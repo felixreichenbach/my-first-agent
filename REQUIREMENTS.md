@@ -8,14 +8,13 @@ A hands-on tutorial project that teaches how an agentic application works by bui
 - Keep the loop explicit and readable (no agent framework) so learners see every step.
 - Run the agent and its supporting services as containers with one command.
 - Make each iteration visible to learners in a terminal trace and in a web chat UI.
-- Stay deliberately uninstrumented (no tracing/metrics code), so observability can be added with the OpenTelemetry or Grafana SDKs as a follow-up (section 6).
 
 ## 2. Non-goals
 
 - Multi-agent orchestration, planning frameworks, or RAG pipelines.
 - Production hardening (auth, scaling, multi-tenancy).
 - Supporting multiple model providers. One provider (Anthropic Claude API) keeps the code small.
-- Built-in telemetry. Instrumentation is left to the learner (section 6).
+- Telemetry (tracing/metrics). The app ships uninstrumented; adding OpenTelemetry or Grafana SDKs is a follow-up.
 
 ## 3. Audience and prerequisites
 
@@ -98,18 +97,7 @@ Known limitation: the page has no authentication, so exposure is limited by bind
  The API key exists only in api and agent.
 ```
 
-## 6. Instrumentation (out of scope, hooks provided)
-
-The application ships without tracing, metrics or OpenTelemetry dependencies. Learners add instrumentation themselves with the OpenTelemetry or Grafana SDKs.
-
-| ID | Requirement |
-|----|-------------|
-| I1 | The loop has one call site for the model (`client.messages.create`), one function for tool execution (`_run_tool`), and one entry point per run (`run_agent`), so spans or metrics can be added without restructuring. |
-| I2 | The loop reports every step through the `on_event` callback, giving a single place to hook in. |
-| I3 | The README's Instrumentation section lists these hook points and what is worth observing at each (model call: model, stop reason, token counts; tool call: name, duration, errors; run: iteration count). |
-| I4 | No secrets or telemetry configuration are required to run the stack. |
-
-## 7. Non-functional requirements
+## 6. Non-functional requirements
 
 - **Readability over cleverness**: type hints, short functions, and comments explaining *why*.
 - **Reproducibility**: exact-pinned dependencies (`requirements.txt` with `==` versions) and pinned image tags.
@@ -118,11 +106,11 @@ The application ships without tracing, metrics or OpenTelemetry dependencies. Le
 - **Portability**: works on macOS, Linux, and Windows (WSL2) with Docker.
 - **Secrets**: `.env` is git-ignored and never copied into an image; no secret is baked into an image or printed in the trace.
 
-## 8. Proposed repository layout
+## 7. Proposed repository layout
 
 ```
 my-first-agent/
-├── README.md              # the how-to (see section 9)
+├── README.md              # concise how-to and reference (see section 8)
 ├── REQUIREMENTS.md        # this document
 ├── docker-compose.yml     # ui, api, tools; plus `agent` (profile: cli) and `test` (profile: test)
 ├── .env.example
@@ -143,24 +131,28 @@ my-first-agent/
 │   ├── requirements.txt
 │   └── app.py             # fetch_url, read_note, write_note
 └── tests/
+    ├── conftest.py        # import paths
     ├── test_loop.py       # loop logic with a fake model client
     ├── test_api.py        # SSE stream and request validation
     └── test_tools.py      # calculator and tools-service safety checks
 ```
 
-## 9. Documentation deliverables (the "how-to")
+## 8. Documentation deliverables
 
-The README walks a learner through, in order:
+The README is a concise reference, not a long tutorial: short sections, tables and diagrams over prose. It contains, in order:
 
-1. **Concepts**: what an agent is, the loop diagram, messages / tool definitions / tool results / stop reasons.
-2. **Run it**: clone, copy `.env.example`, `docker compose run --rm agent "…"`, with sample tasks that need 0, 1, and several tool calls; then the web chat UI (`docker compose up`) and how secrets are kept out of the published container.
-3. **Read the loop**: annotated walkthrough of `loop.py`.
-4. **Add a tool**: guided exercise (for example, a `current_time` tool).
-5. **Break it on purpose**: trigger the iteration cap, a tool error, and a bad tool input, and see how the loop responds.
-6. **Instrument it**: hook points in the loop, and what to observe at each (see section 6).
-7. **Where next**: persistent memory, streaming, human approval for risky tools, evals, guardrails, multi-agent.
+1. **How it works**: a flow diagram of one prompt through the loop (prompt → model decides → use a tool or reply → loop back), using a small worked example (`3 * 7`), plus three bullets on statelessness, who runs tools, and the stop condition.
+2. **Quick start**: prerequisites, `.env` setup, the CLI command, and the web chat UI (`docker compose up`).
+3. **Architecture**: the service layout and a table of what each service does and which hold secrets, with the localhost-only warning for the UI.
+4. **Tools**: a table of the tools and where they run, and a one-line description of how to add one.
+5. **Configuration**: a table of the `.env` variables and defaults.
+6. **Tests**: the command to run them.
+7. **Troubleshooting**: a short symptom/fix table.
+8. **Next steps**: a single line (instrumentation, persistent history, streaming, human approval, evals, guardrails, multi-agent).
 
-## 10. Testing and acceptance criteria
+Detailed explanation lives in the code comments (especially `agent/loop.py`), not in the README.
+
+## 9. Testing and acceptance criteria
 
 - **Unit tests** run in a container (`docker compose run --rm --build test`) using a fake model client that returns scripted responses. They cover: no-tool answer, single tool call, multi-step tool calls, tool error recovery, unknown tools, iteration cap, API failure, history handling, the web API's SSE event stream and request validation, the calculator, and the tools service's URL and path checks.
 - **Acceptance**:
@@ -170,7 +162,7 @@ The README walks a learner through, in order:
   4. `docker compose config` shows `ANTHROPIC_API_KEY` only for `api` and `agent` (not `ui` or `tools`), and only `ui` publishes a port, on `127.0.0.1`.
   5. `docker compose down -v` leaves no containers or volumes behind.
 
-## 11. Open decisions (defaults assumed)
+## 10. Open decisions (defaults assumed)
 
 | Decision | Default | Alternative |
 |----------|---------|-------------|

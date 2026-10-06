@@ -1,6 +1,6 @@
 # my-first-agent
 
-A hands-on tutorial for building an agentic application: an LLM that calls tools in a loop until a task is done. The loop is hand-written against the Anthropic SDK (no framework), runs in containers, and can be watched in a terminal or a web chat UI. It is deliberately not instrumented, so you can add observability yourself (see [Instrumentation](#instrumentation)).
+A hands-on tutorial for building an agentic application: an LLM that calls tools in a loop until a task is done. The loop is hand-written against the Anthropic SDK (no framework), runs in containers, and can be watched in a terminal or a web chat UI.
 
 Design and requirements: [REQUIREMENTS.md](REQUIREMENTS.md)
 
@@ -95,18 +95,6 @@ Set in `.env` (see [.env.example](.env.example)):
 | `MAX_ITERATIONS` | Loop cap | `10` |
 | `UI_PORT` | Host port for the UI | `8080` |
 
-## Instrumentation
-
-The app contains no tracing or metrics code, so you can add your own with the OpenTelemetry or Grafana SDKs. Natural hook points in [agent/loop.py](agent/loop.py):
-
-| Where | What to observe |
-|-------|-----------------|
-| `client.messages.create(...)` in `run_agent` | Each model call: model, stop reason, token counts |
-| `_run_tool` | Each tool call: name, duration, errors |
-| `run_agent` as a whole | One run per prompt, iteration count |
-
-The loop already reports every step through `on_event`, which is a convenient single place to start. To reach a Collector or Alloy running on your host from a container, use `host.docker.internal`.
-
 ## Tests
 
 ```bash
@@ -126,4 +114,4 @@ Uses a scripted fake model client: no API key, free, deterministic.
 
 ## Next steps
 
-Instrument the app, persistent history, streaming model output, human approval for risky tools, evals, guardrails, multiple agents.
+Instrument with OpenTelemetry/Grafana SDKs, persistent history, streaming model output, human approval for risky tools, evals, guardrails, multiple agents.

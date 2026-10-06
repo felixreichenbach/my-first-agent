@@ -1,8 +1,8 @@
-# api (agent HTTP service, holds the secrets) + ui (static page + proxy, no secrets)
-# + tools (side-effecting tools). One-shot CLI: `docker compose run --rm agent "task"`.
+# agent (HTTP service, holds the secrets) + ui (static page + proxy, no secrets)
+# + tools (side-effecting tools). One-shot CLI: `docker compose run --rm agent-cli "task"`.
 services:
   # One-shot CLI. In the "cli" profile so `docker compose up` doesn't start it.
-  agent:
+  agent-cli:
     profiles: ["cli"]
     build:
       context: ./agent
@@ -20,9 +20,9 @@ services:
     stdin_open: true
     tty: true
 
-  # Long-running agent API. Holds ANTHROPIC_API_KEY.
+  # Long-running agent (HTTP/SSE API for the UI). Holds ANTHROPIC_API_KEY.
   # Not published: only the ui container can reach it, over the Compose network.
-  api:
+  agent:
     build:
       context: ./agent
       target: runtime
@@ -52,7 +52,7 @@ services:
     ports:
       - "127.0.0.1:${UI_PORT:-8080}:8080"
     depends_on:
-      api:
+      agent:
         condition: service_healthy
 
   tools:

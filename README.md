@@ -1,25 +1,129 @@
 # my-first-agent
 
-A hands-on tutorial for technical readers who want to understand how agentic applications work. It builds the smallest useful agent: an LLM that calls tools in a loop until a task is done.
+A hands-on tutorial for building an agentic application: an LLM that calls tools in a loop until a task is done. The loop is hand-written against the Anthropic SDK (no framework), runs in containers, and can be watched in a terminal or a web chat UI. It is deliberately not instrumented, so you can add observability yourself (see [Instrumentation](#instrumentation)).
 
-- **Explicit agent loop**: call the model, run the tools it requests, feed the results back, repeat. It is hand-written against the Anthropic SDK with no framework, so every step is visible.
-- **Containerized**: the agent and its tool service run with Docker Compose. You only need Docker and an API key.
-- **Observable**: the agent emits OpenTelemetry traces to a Grafana of your choice, configured through `.env`. Grafana is not part of the Compose stack.
+Design and requirements: [REQUIREMENTS.md](REQUIREMENTS.md)
 
-## Status
+## How it works
 
-Planning stage. The full requirements are in [REQUIREMENTS.md](REQUIREMENTS.md). The code and the step-by-step tutorial are still to be written.
+```
+        ┌─────────────────────────────────────────────────────────┐
+        │ 1. User prompt: "3 * 7 = ?"                             │
+        └────────────────────────────┬────────────────────────────┘
+                                     ▼
+        ┌─────────────────────────────────────────────────────────┐
+   ┌───►│ 2. Model decides:                                       │
+   │    │    do I need a tool?                                    │
+   │    └──────────┬──────────────────────────────┬───────────────┘
+   │           yes │                              │ no
+   │               ▼                              ▼
+   │    ┌─────────────────────┐   ┌───────────────────────────────┐
+   │    │ 3. Run the tool     │   │ 4. Reply to user              │
+   │    │    e.g. calculator: │   │    "3 * 7 = 21"               │
+   │    │    3 * 7 → 21       │   │    then wait for next prompt  │
+   │    │                     │   │                               │
+   │    └──────────┬──────────┘   └───────────────┬───────────────┘
+   │               │                              ▼
+   │               │                       reply is added
+   └───────────────┘                     to the conversation
 
-## Planned quick start
+```
+
+The loop repeats until the model replies without asking for a tool. The user can then send another prompt, which starts the cycle again with the earlier messages included. The result from each tool is added to the conversation, so the model sees it the next time it decides.
+
+- The API is stateless: every call resends the full message history.
+- The model never runs anything. It requests a tool; your code runs it and returns the result.
+- A response with no tool request ends the loop for that prompt. `MAX_ITERATIONS` caps runaway loops.
+
+The loop is in [agent/loop.py](agent/loop.py) (~130 lines).
+
+## Quick start
+
+Requires Docker with Compose v2 and an [Anthropic API key](https://console.anthropic.com/).
 
 ```bash
-cp .env.example .env        # add your ANTHROPIC_API_KEY (and optional Grafana OTLP settings)
+cp .env.example .env     # set ANTHROPIC_API_KEY
+```
+
+**CLI** (trace on stderr, answer on stdout):
+
+```bash
 docker compose run --rm agent "What is 17 * 23, and what is the title of https://example.com?"
 ```
 
-## What you will learn
+**Web chat UI** at http://localhost:8080 (change with `UI_PORT`):
 
-1. What an agent is and how the loop works
-2. How tool definitions, tool calls and tool results fit together
-3. How to add a tool and handle errors and runaway loops
-4. How to trace each loop iteration in Grafana
+```bash
+docker compose up --build -d
+docker compose down          # stop; add -v to delete saved notes
+```
+
+## Architecture
+
+```
+browser ──► ui (nginx, 127.0.0.1:8080) ──► api (agent loop) ──► tools (fetch_url, notes)
+terminal ─► agent (CLI) ───────────────────┘                      └─► workspace volume
+```
+
+| Service | Role | Secrets |
+|---------|------|---------|
+| `ui` | Static chat page, proxies `/api/` to `api`. Only published service, localhost only. | none |
+| `api` | Agent loop behind HTTP, streams steps as Server-Sent Events. | API key |
+| `agent` | One-shot CLI (profile `cli`). | API key |
+| `tools` | Side-effecting tools, read-only filesystem, no published ports. | none |
+
+The web page has no login, so keep it bound to localhost: anyone who can reach it can spend your tokens.
+
+## Tools
+
+| Tool | Runs in | Purpose |
+|------|---------|---------|
+| `calculator` | agent | Safe arithmetic (no `eval`) |
+| `fetch_url` | tools | Fetch a public web page; private addresses are blocked |
+| `write_note` / `read_note` | tools | Notes persisted in a volume |
+
+**Add a tool**: write a function and add one `Tool(...)` entry in `build_registry` in [agent/tools.py](agent/tools.py). The loop does not change. Rebuild with `docker compose up --build -d` (web) or `docker compose run --rm --build agent "..."` (CLI).
+
+## Configuration
+
+Set in `.env` (see [.env.example](.env.example)):
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `ANTHROPIC_API_KEY` | Required | |
+| `MODEL` | Model ID | `claude-haiku-4-5-20251001` |
+| `MAX_ITERATIONS` | Loop cap | `10` |
+| `UI_PORT` | Host port for the UI | `8080` |
+
+## Instrumentation
+
+The app contains no tracing or metrics code, so you can add your own with the OpenTelemetry or Grafana SDKs. Natural hook points in [agent/loop.py](agent/loop.py):
+
+| Where | What to observe |
+|-------|-----------------|
+| `client.messages.create(...)` in `run_agent` | Each model call: model, stop reason, token counts |
+| `_run_tool` | Each tool call: name, duration, errors |
+| `run_agent` as a whole | One run per prompt, iteration count |
+
+The loop already reports every step through `on_event`, which is a convenient single place to start. To reach a Collector or Alloy running on your host from a container, use `host.docker.internal`.
+
+## Tests
+
+```bash
+docker compose run --rm --build test
+```
+
+Uses a scripted fake model client: no API key, free, deterministic.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---------|-----|
+| `Cannot connect to the Docker daemon` | Start Docker. |
+| `ANTHROPIC_API_KEY is not set` | Create `.env` from `.env.example`. |
+| Authentication error | Check the key and that the account has credit. |
+| `port is already allocated` | Set another `UI_PORT`. |
+
+## Next steps
+
+Instrument the app, persistent history, streaming model output, human approval for risky tools, evals, guardrails, multiple agents.

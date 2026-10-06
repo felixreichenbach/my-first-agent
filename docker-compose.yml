@@ -1,0 +1,90 @@
+# api (agent HTTP service, holds the secrets) + ui (static page + proxy, no secrets)
+# + tools (side-effecting tools). One-shot CLI: `docker compose run --rm agent "task"`. Grafana is NOT part of this stack: telemetry goes to
+# whatever OTLP endpoint you configure in .env (see .env.example).
+services:
+  # One-shot CLI. In the "cli" profile so `docker compose up` doesn't start it.
+  agent:
+    profiles: ["cli"]
+    build:
+      context: ./agent
+      target: runtime
+    # .env is optional so `docker compose config` works before you create it,
+    # but the agent will refuse to start without ANTHROPIC_API_KEY.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TOOLS_URL: ${TOOLS_URL:-http://tools:8000}
+    extra_hosts:
+      # Lets the container reach a Collector/Alloy on your host (all platforms).
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      tools:
+        condition: service_healthy
+    stdin_open: true
+    tty: true
+
+  # Long-running agent API. Holds ANTHROPIC_API_KEY and OTLP credentials.
+  # Not published: only the ui container can reach it, over the Compose network.
+  api:
+    build:
+      context: ./agent
+      target: runtime
+    entrypoint: ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8080"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TOOLS_URL: ${TOOLS_URL:-http://tools:8000}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      tools:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:8080/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Web chat UI. Deliberately has NO env_file: compromising this container
+  # (the only one published to the host) cannot reveal the API key.
+  # Bound to localhost because the page has no login; anyone who can reach it can spend your tokens.
+  ui:
+    build: ./ui
+    read_only: true
+    tmpfs:
+      - /tmp
+    ports:
+      - "127.0.0.1:${UI_PORT:-8080}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  tools:
+    build: ./tools_service
+    # No env_file and no secrets: this service never sees the API key or OTLP credentials.
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - workspace:/workspace
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:8000/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    # No published ports: only reachable from other services on the Compose network.
+
+  # Runs the unit tests: docker compose run --rm test
+  test:
+    profiles: ["test"]
+    build:
+      context: ./agent
+      target: test
+    volumes:
+      - ./tests:/app/tests:ro
+      - ./tools_service:/app/tools_service:ro
+
+volumes:
+  workspace:

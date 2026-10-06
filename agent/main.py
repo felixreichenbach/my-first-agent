@@ -38,7 +38,7 @@ def main() -> int:
     task = " ".join(sys.argv[1:]).strip()
     if not task:
         if not sys.stdin.isatty():
-            print("usage: docker compose run --rm agent \"your task\"", file=sys.stderr)
+            print("usage: docker compose run --rm agent-cli \"your task\"", file=sys.stderr)
             return 1
         task = input("Task: ").strip()
         if not task:

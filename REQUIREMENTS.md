@@ -61,40 +61,40 @@ Provide a small set of tools that illustrate different tool patterns. Each tool 
 
 | ID | Requirement |
 |----|-------------|
-| C1 | The web stack (`ui`, `api`, `tools`) starts with `docker compose up` and stops with `docker compose down`. The CLI runs on demand via `docker compose run`. |
-| C2 | **`agent`** service (profile `cli`): runs the loop once from the command line. Slim Python base image, non-root user, no published ports. Run as `docker compose run --rm agent "your task"`. It shares its image with `api`. |
+| C1 | The web stack (`ui`, `agent`, `tools`) starts with `docker compose up` and stops with `docker compose down`. The CLI runs on demand via `docker compose run`. |
+| C2 | **`agent`** service: the agent loop behind HTTP for the web UI (see W1). Slim Python base image, non-root user, no published ports. **`agent-cli`** service (profile `cli`): runs the same loop once from the command line as `docker compose run --rm agent-cli "your task"`. It shares its image with `agent`. |
 | C3 | **`tools`** service: a small HTTP API (for example FastAPI) exposing `fetch_url` and the note tools. Reachable only on the internal Compose network. Isolating side-effecting tools from the agent teaches the trust boundary. |
 | C4 | **`workspace` volume**: named volume mounted into `tools` only, as the sandbox for note files. |
-| C6 | The `tools` and `api` services have healthchecks; `agent` and `api` wait for `tools`, and `ui` waits for `api` (`depends_on: condition: service_healthy`). |
+| C6 | The `tools` and `agent` services have healthchecks; `agent` and `agent-cli` wait for `tools`, and `ui` waits for `agent` (`depends_on: condition: service_healthy`). |
 | C7 | Configuration comes from environment variables loaded from a `.env` file (`ANTHROPIC_API_KEY`, `MODEL`, `MAX_ITERATIONS`, `TOOLS_URL`, `UI_PORT`). Commit a `.env.example` with placeholder values and comments; never commit `.env`. Compose passes values through with `env_file`, so no connection details are hard-coded in images or `docker-compose.yml`. |
 | C8 | Images pin versions (no `latest`). `tools` and `ui` run with a read-only root filesystem (plus `/tmp`, and the workspace volume for `tools`). |
-| C9 | Only the agent containers (`agent`, `api`) receive the API key; `tools` and `ui` must not receive it (give each service its own `env_file`/`environment` list). |
+| C9 | Only the agent containers (`agent`, `agent-cli`) receive the API key; `tools` and `ui` must not receive it (give each service its own `env_file`/`environment` list). |
 
 ### Web chat UI
 
 | ID | Requirement |
 |----|-------------|
-| W1 | **`api`** service: the agent loop behind HTTP (`POST /chat`, `GET /health`), streaming loop events as Server-Sent Events. Holds all secrets; never published to the host. |
-| W2 | **`ui`** service: static HTML/JS page served by nginx, proxying `/api/` to `api`. No `env_file`, no secrets, read-only filesystem. The only service published to the host, bound to `127.0.0.1` (configurable port via `UI_PORT`). |
+| W1 | **`agent`** service (`api.py`): the agent loop behind HTTP (`POST /chat`, `GET /health`), streaming loop events as Server-Sent Events. Holds all secrets; never published to the host. |
+| W2 | **`ui`** service: static HTML/JS page served by nginx, proxying `/api/` to `agent`. No `env_file`, no secrets, read-only filesystem. The only service published to the host, bound to `127.0.0.1` (configurable port via `UI_PORT`). |
 | W3 | The UI shows each loop step (iteration, model text, tool call, tool result) live and supports multi-turn chat; the browser holds the plain-text history and sends it on every request. |
 | W4 | Model and tool output is rendered as text only (no `innerHTML`). Requests are validated (roles, max 50 turns, max 10,000 characters each). |
-| W5 | The loop reports progress through an `on_event` callback so the CLI and web API share one implementation. The CLI is an opt-in Compose profile (`cli`) so `docker compose up` starts only `api`, `ui` and `tools`. |
+| W5 | The loop reports progress through an `on_event` callback so the CLI and web API share one implementation. The CLI is an opt-in Compose profile (`cli`) so `docker compose up` starts only `agent`, `ui` and `tools`. |
 
 Known limitation: the page has no authentication, so exposure is limited by binding to localhost. Anyone who can reach it can spend API tokens.
 
 ### Target architecture
 
 ```
- browser ──► ui (nginx, 127.0.0.1:8080) ──► api ──┐      agent loop runs in
-                                                  ├──►  api (web) or agent (CLI)
- terminal ──────────────────► agent (CLI) ────────┘            │
-                                                               ├──HTTPS──► Claude API
-                                                               │
-                                                               └──HTTP (Compose network)──► tools ──► workspace volume
-                                                                                              └──► the internet (fetch_url)
+ browser ──► ui (nginx, 127.0.0.1:8080) ──► agent ──┐
+                                                    │   (same agent loop in both)
+ terminal ──► agent-cli ────────────────────────────┤
+                                                    ├──HTTPS──► Claude API
+                                                    │
+                                                    └──HTTP (Compose network)──► tools ──► workspace volume
+                                                                                 └──► the internet (fetch_url)
 
- Inside Compose: ui, api, agent (CLI), tools, workspace volume.   Outside Compose: Claude API.
- The API key exists only in api and agent.
+ Inside Compose: ui, agent, agent-cli, tools, workspace volume.   Outside Compose: Claude API.
+ The API key exists only in agent and agent-cli.
 ```
 
 ## 6. Non-functional requirements
@@ -112,7 +112,7 @@ Known limitation: the page has no authentication, so exposure is limited by bind
 my-first-agent/
 ├── README.md              # concise how-to and reference (see section 8)
 ├── REQUIREMENTS.md        # this document
-├── docker-compose.yml     # ui, api, tools; plus `agent` (profile: cli) and `test` (profile: test)
+├── docker-compose.yml     # ui, agent, tools; plus `agent-cli` (profile: cli) and `test` (profile: test)
 ├── .env.example
 ├── ui/
 │   ├── Dockerfile
@@ -156,10 +156,10 @@ Detailed explanation lives in the code comments (especially `agent/loop.py`), no
 
 - **Unit tests** run in a container (`docker compose run --rm --build test`) using a fake model client that returns scripted responses. They cover: no-tool answer, single tool call, multi-step tool calls, tool error recovery, unknown tools, iteration cap, API failure, history handling, the web API's SSE event stream and request validation, the calculator, and the tools service's URL and path checks.
 - **Acceptance**:
-  1. From a clean checkout with only Docker and an API key, `docker compose run --rm agent "What is 17 * 23, and what is the title of https://example.com?"` returns a correct answer and the trace shows both tool calls.
+  1. From a clean checkout with only Docker and an API key, `docker compose run --rm agent-cli "What is 17 * 23, and what is the title of https://example.com?"` returns a correct answer and the trace shows both tool calls.
   2. A note written in one run can be read in a later run (volume persistence).
   3. `docker compose up --build`, then http://localhost:8080 shows a live chat: asking the question from criterion 1 displays the calculator and fetch_url steps and then the answer; a follow-up question can refer to the earlier answer.
-  4. `docker compose config` shows `ANTHROPIC_API_KEY` only for `api` and `agent` (not `ui` or `tools`), and only `ui` publishes a port, on `127.0.0.1`.
+  4. `docker compose config` shows `ANTHROPIC_API_KEY` only for `agent` and `agent-cli` (not `ui` or `tools`), and only `ui` publishes a port, on `127.0.0.1`.
   5. `docker compose down -v` leaves no containers or volumes behind.
 
 ## 10. Open decisions (defaults assumed)

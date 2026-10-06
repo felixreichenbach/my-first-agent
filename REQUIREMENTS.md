@@ -7,13 +7,15 @@ A hands-on tutorial project that teaches how an agentic application works by bui
 - Show that an "agent" is a simple loop: **call model → run requested tools → feed results back → repeat until done**.
 - Keep the loop explicit and readable (no agent framework) so learners see every step.
 - Run the agent and its supporting services as containers with one command.
-- Make the loop observable, so learners can watch each iteration happen: in a terminal trace, in a web chat UI, and in Grafana.
+- Make each iteration visible to learners in a terminal trace and in a web chat UI.
+- Stay deliberately uninstrumented (no tracing/metrics code), so observability can be added with the OpenTelemetry or Grafana SDKs as a follow-up (section 6).
 
 ## 2. Non-goals
 
 - Multi-agent orchestration, planning frameworks, or RAG pipelines.
 - Production hardening (auth, scaling, multi-tenancy).
 - Supporting multiple model providers. One provider (Anthropic Claude API) keeps the code small.
+- Built-in telemetry. Instrumentation is left to the learner (section 6).
 
 ## 3. Audience and prerequisites
 
@@ -64,11 +66,10 @@ Provide a small set of tools that illustrate different tool patterns. Each tool 
 | C2 | **`agent`** service (profile `cli`): runs the loop once from the command line. Slim Python base image, non-root user, no published ports. Run as `docker compose run --rm agent "your task"`. It shares its image with `api`. |
 | C3 | **`tools`** service: a small HTTP API (for example FastAPI) exposing `fetch_url` and the note tools. Reachable only on the internal Compose network. Isolating side-effecting tools from the agent teaches the trust boundary. |
 | C4 | **`workspace` volume**: named volume mounted into `tools` only, as the sandbox for note files. |
-| C5 | **Grafana is not part of the Compose stack.** The agent exports telemetry to any external OTLP endpoint (Grafana Cloud, a self-hosted Grafana/Alloy/Tempo, or an OTel Collector) configured purely through environment variables (see section 6). If no endpoint is configured, telemetry is disabled and the agent runs normally. |
 | C6 | The `tools` and `api` services have healthchecks; `agent` and `api` wait for `tools`, and `ui` waits for `api` (`depends_on: condition: service_healthy`). |
-| C7 | Configuration comes from environment variables loaded from a `.env` file (`ANTHROPIC_API_KEY`, `MODEL`, `MAX_ITERATIONS`, `TOOLS_URL`, plus the OTLP variables in section 6). Commit a `.env.example` with placeholder values and comments; never commit `.env`. Compose passes values through with `env_file`, so no connection details are hard-coded in images or `docker-compose.yml`. |
+| C7 | Configuration comes from environment variables loaded from a `.env` file (`ANTHROPIC_API_KEY`, `MODEL`, `MAX_ITERATIONS`, `TOOLS_URL`, `UI_PORT`). Commit a `.env.example` with placeholder values and comments; never commit `.env`. Compose passes values through with `env_file`, so no connection details are hard-coded in images or `docker-compose.yml`. |
 | C8 | Images pin versions (no `latest`). `tools` and `ui` run with a read-only root filesystem (plus `/tmp`, and the workspace volume for `tools`). |
-| C9 | Only the agent containers (`agent`, `api`) receive the API key and the OTLP credentials; `tools` must not receive either (give each service its own `env_file`/`environment` list). |
+| C9 | Only the agent containers (`agent`, `api`) receive the API key; `tools` and `ui` must not receive it (give each service its own `env_file`/`environment` list). |
 
 ### Web chat UI
 
@@ -90,39 +91,23 @@ Known limitation: the page has no authentication, so exposure is limited by bind
  terminal ──────────────────► agent (CLI) ────────┘            │
                                                                ├──HTTPS──► Claude API
                                                                │
-                                                               ├──OTLP (endpoint + auth from .env)──► external Grafana
-                                                               │       (Cloud, self-hosted, or Collector/Alloy)
-                                                               │
                                                                └──HTTP (Compose network)──► tools ──► workspace volume
                                                                                               └──► the internet (fetch_url)
 
- Inside Compose: ui, api, agent (CLI), tools, workspace volume.   Outside Compose: Claude API, Grafana.
- Secrets (API key, OTLP credentials) exist only in api and agent.
+ Inside Compose: ui, api, agent (CLI), tools, workspace volume.   Outside Compose: Claude API.
+ The API key exists only in api and agent.
 ```
 
-## 6. Observability requirements
+## 6. Instrumentation (out of scope, hooks provided)
+
+The application ships without tracing, metrics or OpenTelemetry dependencies. Learners add instrumentation themselves with the OpenTelemetry or Grafana SDKs.
 
 | ID | Requirement |
 |----|-------------|
-| O1 | Instrument with OpenTelemetry. One trace per run; one span per loop iteration; child spans for each model call and each tool call. |
-| O2 | Span attributes: model, iteration number, tool name, stop reason, input/output token counts, error status. |
-| O3 | Do not record full prompts or tool outputs by default (they may contain secrets); gate that behind `OTEL_CAPTURE_CONTENT=true`. |
-| O4 | The tutorial includes a step to open Grafana, find the trace, and relate each span back to a loop iteration. |
-| O5 | **Connection is configured only via standard OpenTelemetry environment variables** in `.env`; the code contains no Grafana-specific settings. |
-| O6 | If `OTEL_EXPORTER_OTLP_ENDPOINT` is unset, telemetry is a no-op (traces optionally printed to the console with `OTEL_TRACES_EXPORTER=console`). A misconfigured or unreachable endpoint must log a warning and never fail or slow the agent run. |
-
-### Grafana connection variables (`.env`)
-
-| Variable | Purpose | Example |
-|----------|---------|---------|
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP base URL | Cloud: `https://otlp-gateway-<zone>.grafana.net/otlp` · Local Collector/Alloy on the host: `http://host.docker.internal:4318` |
-| `OTEL_EXPORTER_OTLP_PROTOCOL` | Transport | `http/protobuf` |
-| `OTEL_EXPORTER_OTLP_HEADERS` | Auth | Cloud: `Authorization=Basic%20<base64(instanceID:token)>` (header values are percent-encoded, so the space is `%20`) |
-| `OTEL_SERVICE_NAME` | Service name in Grafana | `my-first-agent` |
-| `OTEL_RESOURCE_ATTRIBUTES` | Optional labels | `deployment.environment=dev` |
-| `OTEL_CAPTURE_CONTENT` | Record prompts/tool output (see O3) | `false` |
-
-`.env.example` documents each variable, with the Grafana Cloud values (where to find the OTLP endpoint and how to generate the token) and a local-collector alternative. The tutorial notes that `localhost` inside a container is the container itself, so a host-side Grafana stack needs `host.docker.internal` (Compose adds `extra_hosts: host.docker.internal:host-gateway` to the agent containers so this works on Linux too) or a shared Docker network. Telemetry is set up in both the CLI and the `api` service.
+| I1 | The loop has one call site for the model (`client.messages.create`), one function for tool execution (`_run_tool`), and one entry point per run (`run_agent`), so spans or metrics can be added without restructuring. |
+| I2 | The loop reports every step through the `on_event` callback, giving a single place to hook in. |
+| I3 | The README's Instrumentation section lists these hook points and what is worth observing at each (model call: model, stop reason, token counts; tool call: name, duration, errors; run: iteration count). |
+| I4 | No secrets or telemetry configuration are required to run the stack. |
 
 ## 7. Non-functional requirements
 
@@ -152,8 +137,7 @@ my-first-agent/
 │   ├── main.py            # CLI entry point
 │   ├── api.py             # HTTP/SSE service for the web UI
 │   ├── loop.py            # the agent loop (the star of the show)
-│   ├── tools.py           # tool definitions + registry
-│   └── telemetry.py       # OpenTelemetry setup
+│   └── tools.py           # tool definitions + registry
 ├── tools_service/
 │   ├── Dockerfile
 │   ├── requirements.txt
@@ -173,7 +157,7 @@ The README walks a learner through, in order:
 3. **Read the loop**: annotated walkthrough of `loop.py`.
 4. **Add a tool**: guided exercise (for example, a `current_time` tool).
 5. **Break it on purpose**: trigger the iteration cap, a tool error, and a bad tool input, and see how the loop responds.
-6. **Observe it**: put your Grafana OTLP endpoint and credentials in `.env`, re-run the agent, and inspect the trace in Grafana.
+6. **Instrument it**: hook points in the loop, and what to observe at each (see section 6).
 7. **Where next**: persistent memory, streaming, human approval for risky tools, evals, guardrails, multi-agent.
 
 ## 10. Testing and acceptance criteria
@@ -182,10 +166,9 @@ The README walks a learner through, in order:
 - **Acceptance**:
   1. From a clean checkout with only Docker and an API key, `docker compose run --rm agent "What is 17 * 23, and what is the title of https://example.com?"` returns a correct answer and the trace shows both tool calls.
   2. A note written in one run can be read in a later run (volume persistence).
-  3. With OTLP variables set in `.env` pointing at an external Grafana, a trace for the run is visible with per-iteration spans; with them unset, the agent still runs and prints a note that telemetry is disabled.
-  4. `docker compose up --build`, then http://localhost:8080 shows a live chat: asking the question from criterion 1 displays the calculator and fetch_url steps and then the answer; a follow-up question can refer to the earlier answer.
-  5. `docker compose config` shows `ANTHROPIC_API_KEY` and OTLP credentials only for `api` and `agent` (not `ui` or `tools`), and only `ui` publishes a port, on `127.0.0.1`.
-  6. `docker compose down -v` leaves no containers or volumes behind.
+  3. `docker compose up --build`, then http://localhost:8080 shows a live chat: asking the question from criterion 1 displays the calculator and fetch_url steps and then the answer; a follow-up question can refer to the earlier answer.
+  4. `docker compose config` shows `ANTHROPIC_API_KEY` only for `api` and `agent` (not `ui` or `tools`), and only `ui` publishes a port, on `127.0.0.1`.
+  5. `docker compose down -v` leaves no containers or volumes behind.
 
 ## 11. Open decisions (defaults assumed)
 
@@ -194,4 +177,4 @@ The README walks a learner through, in order:
 | Language | Python 3.12 | TypeScript |
 | Model provider | Anthropic API | Local model via Ollama container (removes API key and cost) |
 | Loop implementation | Hand-written against the Anthropic SDK | SDK tool runner (shorter, hides the loop) |
-| Observability | OpenTelemetry → external Grafana via `.env` | Plain structured logs only |
+| Observability | None built in; learner adds OpenTelemetry/Grafana SDKs | Ship pre-instrumented |

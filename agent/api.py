@@ -9,7 +9,6 @@ import json
 import os
 import queue
 import threading
-from contextlib import asynccontextmanager
 from typing import Any, Iterator, Literal
 
 import anthropic
@@ -19,18 +18,10 @@ from pydantic import BaseModel, Field
 
 from loop import AgentError, run_agent
 from main import SYSTEM_PROMPT
-from telemetry import setup_telemetry, shutdown_telemetry
 from tools import build_registry
 
 
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    provider = setup_telemetry()
-    yield
-    shutdown_telemetry(provider)
-
-
-app = FastAPI(lifespan=lifespan)
+app = FastAPI()
 
 
 class Turn(BaseModel):

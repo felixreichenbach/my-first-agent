@@ -2,5 +2,3 @@ anthropic==0.125.0
 httpx==0.28.1
 fastapi==0.128.8
 uvicorn==0.39.0
-opentelemetry-sdk==1.41.1
-opentelemetry-exporter-otlp-proto-http==1.41.1

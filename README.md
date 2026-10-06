@@ -1,6 +1,6 @@
 # my-first-agent
 
-A hands-on tutorial for building an agentic application: an LLM that calls tools in a loop until a task is done. The loop is hand-written against the Anthropic SDK (no framework), runs in containers, and can be watched in a terminal, a web chat UI, and Grafana.
+A hands-on tutorial for building an agentic application: an LLM that calls tools in a loop until a task is done. The loop is hand-written against the Anthropic SDK (no framework), runs in containers, and can be watched in a terminal or a web chat UI. It is deliberately not instrumented, so you can add observability yourself (see [Instrumentation](#instrumentation)).
 
 Design and requirements: [REQUIREMENTS.md](REQUIREMENTS.md)
 
@@ -68,8 +68,8 @@ terminal ─► agent (CLI) ─────────────────�
 | Service | Role | Secrets |
 |---------|------|---------|
 | `ui` | Static chat page, proxies `/api/` to `api`. Only published service, localhost only. | none |
-| `api` | Agent loop behind HTTP, streams steps as Server-Sent Events. | API key, OTLP credentials |
-| `agent` | One-shot CLI (profile `cli`). | API key, OTLP credentials |
+| `api` | Agent loop behind HTTP, streams steps as Server-Sent Events. | API key |
+| `agent` | One-shot CLI (profile `cli`). | API key |
 | `tools` | Side-effecting tools, read-only filesystem, no published ports. | none |
 
 The web page has no login, so keep it bound to localhost: anyone who can reach it can spend your tokens.
@@ -94,26 +94,18 @@ Set in `.env` (see [.env.example](.env.example)):
 | `MODEL` | Model ID | `claude-haiku-4-5-20251001` |
 | `MAX_ITERATIONS` | Loop cap | `10` |
 | `UI_PORT` | Host port for the UI | `8080` |
-| `OTEL_*` | Telemetry, see below | disabled |
 
-## Observability
+## Instrumentation
 
-Telemetry uses standard OpenTelemetry variables only, for both CLI and web. Grafana is not part of the stack; point the agent at Grafana Cloud or a Collector/Alloy, or set `OTEL_TRACES_EXPORTER=console`. From a container, use `host.docker.internal` to reach a service on your host. Examples are in [.env.example](.env.example).
+The app contains no tracing or metrics code, so you can add your own with the OpenTelemetry or Grafana SDKs. Natural hook points in [agent/loop.py](agent/loop.py):
 
-Each prompt produces one trace. Each line is a span (a timed step); indentation shows nesting. For the `3 * 7 = ?` example from above:
+| Where | What to observe |
+|-------|-----------------|
+| `client.messages.create(...)` in `run_agent` | Each model call: model, stop reason, token counts |
+| `_run_tool` | Each tool call: name, duration, errors |
+| `run_agent` as a whole | One run per prompt, iteration count |
 
-```
-agent.run                         the whole prompt, start to finish
-├─ agent.iteration  (1)           first pass through the loop
-│  ├─ model.call                  2. model decides: stop_reason=tool_use (calculator)
-│  └─ tool.call                   3. calculator runs: 3 * 7 → 21
-└─ agent.iteration  (2)           second pass, tool result is in the conversation
-   └─ model.call                  model decides: stop_reason=end_turn, 4. reply "3 * 7 = 21"
-```
-
-In Grafana you can see how many iterations a prompt took, which tools ran, how long each step took, and token counts per model call. A prompt that needs no tool has a single iteration with one `model.call`.
-
-Prompts and tool output are recorded only if `OTEL_CAPTURE_CONTENT=true`.
+The loop already reports every step through `on_event`, which is a convenient single place to start. To reach a Collector or Alloy running on your host from a container, use `host.docker.internal`.
 
 ## Tests
 
@@ -131,8 +123,7 @@ Uses a scripted fake model client: no API key, free, deterministic.
 | `ANTHROPIC_API_KEY is not set` | Create `.env` from `.env.example`. |
 | Authentication error | Check the key and that the account has credit. |
 | `port is already allocated` | Set another `UI_PORT`. |
-| No traces | Check `OTEL_EXPORTER_OTLP_*`; try `OTEL_TRACES_EXPORTER=console`. |
 
 ## Next steps
 
-Persistent history, streaming model output, human approval for risky tools, evals, guardrails, multiple agents.
+Instrument the app, persistent history, streaming model output, human approval for risky tools, evals, guardrails, multiple agents.

@@ -7,7 +7,6 @@ import sys
 import anthropic
 
 from loop import AgentError, run_agent
-from telemetry import setup_telemetry, shutdown_telemetry
 from tools import build_registry
 
 SYSTEM_PROMPT = (
@@ -51,7 +50,6 @@ def main() -> int:
         print("error: MAX_ITERATIONS must be an integer", file=sys.stderr)
         return 1
 
-    provider = setup_telemetry()
     try:
         result = run_agent(
             anthropic.Anthropic(max_retries=3),  # bounded retries with backoff
@@ -65,8 +63,6 @@ def main() -> int:
     except AgentError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    finally:
-        shutdown_telemetry(provider)
 
     print(f"\n{result.answer}")
     print(f"\n[{result.iterations} iteration(s), {result.input_tokens} input / "

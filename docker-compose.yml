@@ -1,6 +1,5 @@
 # api (agent HTTP service, holds the secrets) + ui (static page + proxy, no secrets)
-# + tools (side-effecting tools). One-shot CLI: `docker compose run --rm agent "task"`. Grafana is NOT part of this stack: telemetry goes to
-# whatever OTLP endpoint you configure in .env (see .env.example).
+# + tools (side-effecting tools). One-shot CLI: `docker compose run --rm agent "task"`.
 services:
   # One-shot CLI. In the "cli" profile so `docker compose up` doesn't start it.
   agent:
@@ -15,16 +14,13 @@ services:
         required: false
     environment:
       TOOLS_URL: ${TOOLS_URL:-http://tools:8000}
-    extra_hosts:
-      # Lets the container reach a Collector/Alloy on your host (all platforms).
-      - "host.docker.internal:host-gateway"
     depends_on:
       tools:
         condition: service_healthy
     stdin_open: true
     tty: true
 
-  # Long-running agent API. Holds ANTHROPIC_API_KEY and OTLP credentials.
+  # Long-running agent API. Holds ANTHROPIC_API_KEY.
   # Not published: only the ui container can reach it, over the Compose network.
   api:
     build:
@@ -36,8 +32,6 @@ services:
         required: false
     environment:
       TOOLS_URL: ${TOOLS_URL:-http://tools:8000}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     depends_on:
       tools:
         condition: service_healthy
@@ -63,7 +57,7 @@ services:
 
   tools:
     build: ./tools_service
-    # No env_file and no secrets: this service never sees the API key or OTLP credentials.
+    # No env_file and no secrets: this service never sees the API key.
     read_only: true
     tmpfs:
       - /tmp

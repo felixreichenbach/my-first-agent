@@ -125,6 +125,15 @@ Set in `.env` (see [.env.example](.env.example)):
 | `MODEL` | Model ID | `claude-haiku-4-5-20251001` |
 | `MAX_ITERATIONS` | Loop cap | `10` |
 | `UI_PORT` | Host port for the UI | `8080` |
+| `AGENTO11Y_*`, `OTEL_EXPORTER_OTLP_*` | Grafana connection values. Only used once you instrument the app (see [Observability](#observability)); the shipped app ignores them | unset |
+
+## Observability
+
+The app ships **uninstrumented**: it contains no tracing, metrics or telemetry code. Instrumenting it with Grafana Agent Observability is the exercise this repo is built for.
+
+Follow [docs/agent-observability.md](docs/agent-observability.md). It covers the prerequisites, where to get the connection values in Grafana, and the ways to instrument the app: with a coding agent and gcx, with a coding agent without gcx, or by hand. The commented Grafana block in [.env.example](.env.example) is where those values go.
+
+Good places to hook in are the model call and `_run_tool` in [agent/loop.py](agent/loop.py). The loop also reports every step through its `on_event` callback.
 
 ## Tests
 
@@ -145,4 +154,4 @@ Uses a scripted fake model client: no API key, free, deterministic.
 
 ## Next steps
 
-Instrument with OpenTelemetry/Grafana SDKs, persistent history, streaming model output, human approval for risky tools, evals, guardrails, multiple agents.
+Instrument the app ([guide](docs/agent-observability.md)), persistent history, streaming model output, human approval for risky tools, evals, guardrails, multiple agents.

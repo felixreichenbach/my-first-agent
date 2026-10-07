@@ -44,6 +44,8 @@ const form = document.getElementById("form");
 const input = document.getElementById("input");
 const send = document.getElementById("send");
 const history = [];  // plain-text turns; sent with every request
+// One id per page load groups all turns of this chat into one conversation in Agent Observability.
+const conversationId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2)).replace(/[^A-Za-z0-9_-]/g, "");
 
 // All content is inserted with textContent, never innerHTML (model/tool output is untrusted).
 function el(tag, cls, text) {
@@ -90,7 +92,7 @@ async function ask(text) {
   const state = {};
   const resp = await fetch("api/chat", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages: history }),
+    body: JSON.stringify({ messages: history, conversation_id: conversationId }),
   });
   if (!resp.ok || !resp.body) {
     const body = await resp.json().catch(() => ({}));

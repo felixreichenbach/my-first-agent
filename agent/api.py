@@ -9,6 +9,8 @@ import json
 import os
 import queue
 import threading
+import uuid
+from contextlib import asynccontextmanager
 from typing import Any, Iterator, Literal
 
 import anthropic
@@ -18,10 +20,22 @@ from pydantic import BaseModel, Field
 
 from loop import AgentError, run_agent
 from main import SYSTEM_PROMPT
+from observability import Observability, setup_observability
 from tools import build_registry
 
 
-app = FastAPI()
+obs: Observability = Observability()  # replaced with the real one at startup
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    global obs
+    obs = setup_observability("web")
+    yield
+    obs.shutdown()
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 class Turn(BaseModel):
@@ -33,6 +47,8 @@ class ChatRequest(BaseModel):
     # The browser keeps the conversation and sends it with every request.
     # Only plain text is carried between turns; tool calls from earlier turns are not replayed.
     messages: list[Turn] = Field(min_length=1, max_length=50)
+    # Optional: lets the UI group every turn of one chat into a single conversation.
+    conversation_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
 
 
 def get_client() -> anthropic.Anthropic:
@@ -56,6 +72,7 @@ def chat(req: ChatRequest):
         return JSONResponse(status_code=400, content={"error": "last message must be from the user"})
 
     *history, last = [m.model_dump() for m in req.messages]
+    conversation_id = req.conversation_id or str(uuid.uuid4())
     events: "queue.Queue[dict[str, Any] | None]" = queue.Queue()
 
     def work() -> None:
@@ -67,6 +84,7 @@ def chat(req: ChatRequest):
                 system=SYSTEM_PROMPT,
                 max_iterations=int(os.getenv("MAX_ITERATIONS", "10")),
                 history=history, on_event=events.put,
+                obs=obs, conversation_id=conversation_id,
             )
             events.put({"type": "answer", "text": result.answer, "finished": result.finished,
                         "iterations": result.iterations,

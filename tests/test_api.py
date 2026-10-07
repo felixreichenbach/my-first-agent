@@ -68,3 +68,25 @@ def test_last_message_must_be_from_user(client):
 def test_missing_api_key(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     assert chat(TestClient(api.app), [{"role": "user", "content": "a"}]).status_code == 500
+
+
+def test_conversation_id_is_passed_to_the_loop(client, monkeypatch):
+    seen = {}
+    real = api.run_agent
+
+    def spy(*args, **kwargs):
+        seen["conversation_id"] = kwargs["conversation_id"]
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(api, "run_agent", spy)
+    monkeypatch.setattr(api, "get_client", lambda: FakeClient([text("ok")]))
+    client.post("/chat", json={"messages": [{"role": "user", "content": "a"}], "conversation_id": "abc-123"})
+    assert seen["conversation_id"] == "abc-123"
+
+
+def test_conversation_id_defaults_and_is_validated(client, monkeypatch):
+    monkeypatch.setattr(api, "get_client", lambda: FakeClient([text("ok")]))
+    r = client.post("/chat", json={"messages": [{"role": "user", "content": "a"}]})
+    assert r.status_code == 200
+    bad = client.post("/chat", json={"messages": [{"role": "user", "content": "a"}], "conversation_id": "bad id!"})
+    assert bad.status_code == 422

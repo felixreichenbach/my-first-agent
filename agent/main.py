@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import os
 import sys
+import uuid
 
 import anthropic
 
 from loop import AgentError, run_agent
+from observability import setup_observability
 from tools import build_registry
 
 SYSTEM_PROMPT = (
@@ -50,6 +52,7 @@ def main() -> int:
         print("error: MAX_ITERATIONS must be an integer", file=sys.stderr)
         return 1
 
+    obs = setup_observability("cli")
     try:
         result = run_agent(
             anthropic.Anthropic(max_retries=3),  # bounded retries with backoff
@@ -59,10 +62,14 @@ def main() -> int:
             system=SYSTEM_PROMPT,
             max_iterations=max_iterations,
             on_event=print_event,
+            obs=obs,
+            conversation_id=str(uuid.uuid4()),
         )
     except AgentError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    finally:
+        obs.shutdown()  # flush queued generations and spans before the one-shot container exits
 
     print(f"\n{result.answer}")
     print(f"\n[{result.iterations} iteration(s), {result.input_tokens} input / "

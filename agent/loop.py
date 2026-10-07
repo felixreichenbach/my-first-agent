@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 import anthropic
 
+from observability import Observability
 from tools import Tool, ToolError, truncate
 
 
@@ -38,12 +39,16 @@ def run_agent(
     max_iterations: int = 10,
     history: list[dict[str, Any]] | None = None,
     on_event: Callable[[dict[str, Any]], None] = lambda event: None,
+    obs: Observability | None = None,
+    conversation_id: str = "",
 ) -> RunResult:
     """Run the loop. `history` is earlier chat turns (plain user/assistant text), if any.
 
     Progress is reported through `on_event` so the CLI can print it and the web
-    API can stream it; the loop itself does no I/O.
+    API can stream it; the loop itself does no I/O. `obs` records generations and tool
+    calls for Grafana Agent Observability; it is a pass-through when not configured.
     """
+    obs = obs or Observability()
     messages: list[dict[str, Any]] = [*(history or []), {"role": "user", "content": task}]
     tool_defs = [t.definition() for t in registry.values()]
     in_tok = out_tok = 0
@@ -53,11 +58,10 @@ def run_agent(
 
         # 1. Ask the model what to do next. The SDK retries transient
         #    errors (429/5xx/network) with backoff; we only see the final failure.
+        request = dict(model=model, max_tokens=2048, system=system,
+                       messages=list(messages), tools=tool_defs)
         try:
-            response = client.messages.create(
-                model=model, max_tokens=2048, system=system,
-                messages=messages, tools=tool_defs,
-            )
+            response = obs.create_message(client, request, conversation_id=conversation_id)
         except anthropic.APIError as exc:
             raise AgentError(f"model API call failed: {exc}") from exc
         in_tok += response.usage.input_tokens
@@ -79,7 +83,8 @@ def run_agent(
             return RunResult(answer, True, iteration, in_tok, out_tok)
 
         # 3. Run every requested tool and send all results back in ONE user message.
-        results = [_run_tool(call, registry, on_event) for call in tool_calls]
+        results = [_run_tool(call, registry, on_event, obs, conversation_id, model)
+                   for call in tool_calls]
         messages.append({"role": "user", "content": results})
 
     # Safety net: never loop forever (and never spend unbounded money).
@@ -89,22 +94,25 @@ def run_agent(
     )
 
 
-def _run_tool(call: Any, registry: dict[str, Tool], on_event: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+def _run_tool(call: Any, registry: dict[str, Tool], on_event: Callable[[dict[str, Any]], None],
+              obs: Observability, conversation_id: str, model: str) -> dict[str, Any]:
     """Execute one tool call. Errors become results the model can read, not crashes."""
     on_event({"type": "tool_call", "name": call.name, "input": call.input})
 
     is_error = False
     tool = registry.get(call.name)
-    try:
-        if tool is None:
-            raise ToolError(f"unknown tool {call.name!r}; available: {', '.join(registry)}")
-        output = truncate(str(tool.func(**call.input)))
-    except ToolError as exc:
-        is_error, output = True, f"Error: {exc}"
-    except TypeError as exc:  # model sent arguments that don't match the schema
-        is_error, output = True, f"Error: bad arguments for {call.name}: {exc}"
-    except Exception as exc:  # a bug in a tool must not kill the run
-        is_error, output = True, f"Error: tool {call.name} failed: {exc}"
+    with obs.tool_execution(call.name, call.id, conversation_id=conversation_id, model=model) as rec:
+        try:
+            if tool is None:
+                raise ToolError(f"unknown tool {call.name!r}; available: {', '.join(registry)}")
+            output = truncate(str(tool.func(**call.input)))
+        except ToolError as exc:
+            is_error, output = True, f"Error: {exc}"
+        except TypeError as exc:  # model sent arguments that don't match the schema
+            is_error, output = True, f"Error: bad arguments for {call.name}: {exc}"
+        except Exception as exc:  # a bug in a tool must not kill the run
+            is_error, output = True, f"Error: tool {call.name} failed: {exc}"
+        rec.finish(call.input, output, is_error)
 
     on_event({"type": "tool_result", "name": call.name, "output": output, "is_error": is_error})
     return {"type": "tool_result", "tool_use_id": call.id, "content": output, "is_error": is_error}

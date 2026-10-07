@@ -5,8 +5,15 @@ pass-through and the agent behaves exactly as it does without telemetry. When on
 a failure in recording is logged and swallowed: observability must never break a run.
 
 Two independent channels, both configured only through environment variables:
-  * generations (prompt, reply, tokens, model) -> AGENTO11Y_* via the agento11y SDK
-  * OTel traces and metrics                    -> OTEL_EXPORTER_OTLP_*
+  * generations, tool executions and workflow steps -> AGENTO11Y_* via the agento11y SDK
+  * OTel traces and metrics                         -> OTEL_EXPORTER_OTLP_*
+
+A run is a graph of workflow steps, which Grafana draws in the conversation's Workflow tab:
+
+    decide(1) -> tool:calculator -> decide(2)
+
+Each `decide` step is linked to the generation (model call) it wraps; each tool step has the
+`decide` step that requested it as its parent, and the next `decide` has the tool steps as parents.
 """
 from __future__ import annotations
 
@@ -14,11 +21,18 @@ import contextlib
 import logging
 import os
 import sys
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Iterator
 
 log = logging.getLogger("observability")
 
 AGENT_NAME = "my-first-agent"
+FRAMEWORK = "custom"  # a hand-written loop: no framework adapter fills the steps in for us
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class _NoopToolRecorder:
@@ -26,28 +40,56 @@ class _NoopToolRecorder:
         pass
 
 
-class Observability:
+class Run:
     """Disabled implementation: calls straight through, records nothing."""
 
-    enabled = False
-
-    def create_message(self, client: Any, request: dict[str, Any], *, conversation_id: str = "") -> Any:
+    def create_message(self, client: Any, request: dict[str, Any], iteration: int) -> Any:
         return client.messages.create(**request)
 
     @contextlib.contextmanager
-    def tool_execution(self, name: str, call_id: str, *, conversation_id: str = "",
-                       model: str = "") -> Iterator[_NoopToolRecorder]:
+    def tool_execution(self, name: str, call_id: str) -> Iterator[_NoopToolRecorder]:
         yield _NoopToolRecorder()
+
+
+class Observability:
+    """Disabled implementation. `ActiveObservability` below does the real work."""
+
+    enabled = False
+
+    def start_run(self, conversation_id: str = "", model: str = "") -> Run:
+        return Run()
 
     def shutdown(self) -> None:
         pass
 
 
+class _RecorderCapturingClient:
+    """Wraps the SDK client so we can read the generation id back from the recorder.
+
+    The Anthropic wrapper only needs `start_generation`, and does not return the recorder or the
+    generation id. We need the id to link a workflow step to the generation it contains.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.recorder: Any = None
+
+    def start_generation(self, start: Any) -> Any:
+        self.recorder = self._inner.start_generation(start)
+        return self.recorder
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 class _ToolRecorder:
     def __init__(self, recorder: Any, tool_end: Any) -> None:
         self._recorder, self._tool_end = recorder, tool_end
+        self.is_error = False
+        self.output_chars = 0
 
     def finish(self, arguments: dict[str, Any], output: str, is_error: bool) -> None:
+        self.is_error, self.output_chars = is_error, len(output)
         try:
             if is_error:
                 self._recorder.set_exec_error(RuntimeError(output))
@@ -57,14 +99,27 @@ class _ToolRecorder:
             log.warning("observability: recording tool result failed: %s", exc)
 
 
-class ActiveObservability(Observability):
-    enabled = True
+class ActiveRun(Run):
+    def __init__(self, obs: "ActiveObservability", conversation_id: str, model: str) -> None:
+        self._obs, self._conversation_id, self._model = obs, conversation_id, model
+        self._decide_step_id = ""            # the decide step whose tools are running now
+        self._tool_step_ids: list[str] = []  # tool steps since that decide: parents of the next one
 
-    def __init__(self, client: Any, entrypoint: str, version: str, providers: tuple[Any, ...] = ()) -> None:
-        self._client, self._entrypoint, self._version = client, entrypoint, version
-        self._providers = providers
+    def _enqueue_step(self, **fields: Any) -> str:
+        from agento11y import WorkflowStep
 
-    def create_message(self, client: Any, request: dict[str, Any], *, conversation_id: str = "") -> Any:
+        step_id = f"wfs_{uuid.uuid4().hex[:16]}"
+        try:
+            self._obs.client.enqueue_workflow_step(WorkflowStep(
+                id=step_id, conversation_id=self._conversation_id, framework=FRAMEWORK,
+                agent_name=AGENT_NAME, agent_version=self._obs.version,
+                tags={"entrypoint": self._obs.entrypoint}, **fields,
+            ))
+        except Exception as exc:
+            log.warning("observability: recording workflow step failed: %s", exc)
+        return step_id
+
+    def create_message(self, client: Any, request: dict[str, Any], iteration: int) -> Any:
         from agento11y_anthropic import AnthropicOptions
         from agento11y_anthropic import messages as anthropic_messages
 
@@ -74,46 +129,91 @@ class ActiveObservability(Observability):
             captured["response"] = client.messages.create(**req)
             return captured["response"]
 
+        proxy = _RecorderCapturingClient(self._obs.client)
         options = AnthropicOptions(
-            conversation_id=conversation_id, agent_name=AGENT_NAME, agent_version=self._version,
-            tags={"entrypoint": self._entrypoint},
+            conversation_id=self._conversation_id, agent_name=AGENT_NAME, agent_version=self._obs.version,
+            tags={"entrypoint": self._obs.entrypoint},
         )
+        started, error = _now(), ""
         try:
-            return anthropic_messages.create(self._client, request, call_model, options)
+            return anthropic_messages.create(proxy, request, call_model, options)
         except Exception as exc:
             if "response" in captured:
                 # The model answered; only recording failed (the SDK re-raises its own errors).
                 log.warning("observability: recording generation failed: %s", exc)
                 return captured["response"]
-            raise  # the model call itself failed: let the loop handle it as before
+            error = type(exc).__name__  # the model call itself failed: let the loop handle it
+            raise
+        finally:
+            self._record_decide_step(proxy, captured.get("response"), iteration, started, error)
+
+    def _record_decide_step(self, proxy: _RecorderCapturingClient, response: Any, iteration: int,
+                            started: datetime, error: str) -> None:
+        generation_ids: list[str] = []
+        try:
+            generation = proxy.recorder.last_generation if proxy.recorder is not None else None
+            if generation is not None and generation.id:
+                generation_ids = [generation.id]
+        except Exception as exc:
+            log.warning("observability: could not read generation id: %s", exc)
+
+        tool_calls = [b.name for b in getattr(response, "content", []) if getattr(b, "type", "") == "tool_use"]
+        # Only metadata in the step state (no prompt or tool content): same default as the generations.
+        self._decide_step_id = self._enqueue_step(
+            step_name="decide", started_at=started, completed_at=_now(), error=error,
+            input_state={"iteration": iteration},
+            output_state={"stop_reason": str(getattr(response, "stop_reason", "")), "tool_calls": tool_calls},
+            linked_generation_ids=generation_ids, parent_step_ids=list(self._tool_step_ids),
+        )
+        self._tool_step_ids = []
 
     @contextlib.contextmanager
-    def tool_execution(self, name: str, call_id: str, *, conversation_id: str = "",
-                       model: str = "") -> Iterator[Any]:
+    def tool_execution(self, name: str, call_id: str) -> Iterator[Any]:
         from agento11y import ToolExecutionEnd, ToolExecutionStart
 
+        started = _now()
         try:
-            recorder = self._client.start_tool_execution(ToolExecutionStart(
-                tool_name=name, tool_call_id=call_id, conversation_id=conversation_id,
-                agent_name=AGENT_NAME, agent_version=self._version,
-                request_model=model, request_provider="anthropic",
+            recorder = self._obs.client.start_tool_execution(ToolExecutionStart(
+                tool_name=name, tool_call_id=call_id, conversation_id=self._conversation_id,
+                agent_name=AGENT_NAME, agent_version=self._obs.version,
+                request_model=self._model, request_provider="anthropic",
             ))
         except Exception as exc:
             log.warning("observability: starting tool execution failed: %s", exc)
-            yield _NoopToolRecorder()
-            return
+            recorder = None
+        tool = _ToolRecorder(recorder, ToolExecutionEnd) if recorder is not None else _NoopToolRecorder()
         try:
-            yield _ToolRecorder(recorder, ToolExecutionEnd)
+            yield tool
         finally:
-            try:
-                recorder.end()
-            except Exception as exc:
-                log.warning("observability: ending tool execution failed: %s", exc)
+            if recorder is not None:
+                try:
+                    recorder.end()
+                except Exception as exc:
+                    log.warning("observability: ending tool execution failed: %s", exc)
+            is_error = getattr(tool, "is_error", False)
+            self._tool_step_ids.append(self._enqueue_step(
+                step_name=f"tool:{name}", started_at=started, completed_at=_now(),
+                error="tool returned an error" if is_error else "",
+                input_state={"tool": name},
+                output_state={"is_error": is_error, "output_chars": getattr(tool, "output_chars", 0)},
+                parent_step_ids=[self._decide_step_id] if self._decide_step_id else [],
+            ))
+
+
+class ActiveObservability(Observability):
+    enabled = True
+
+    def __init__(self, client: Any, entrypoint: str, version: str, providers: tuple[Any, ...] = ()) -> None:
+        self.client, self.entrypoint, self.version = client, entrypoint, version
+        self._providers = providers
+
+    def start_run(self, conversation_id: str = "", model: str = "") -> Run:
+        return ActiveRun(self, conversation_id or str(uuid.uuid4()), model)
 
     def shutdown(self) -> None:
-        """Flush queued generations, then the OTel providers, before the process exits."""
+        """Flush queued generations and steps, then the OTel providers, before the process exits."""
         try:
-            self._client.shutdown()
+            self.client.shutdown()
         except Exception as exc:
             log.warning("observability: client shutdown failed: %s", exc)
         for provider in self._providers:

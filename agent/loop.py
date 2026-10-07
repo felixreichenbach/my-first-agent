@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 import anthropic
 
-from observability import Observability
+from observability import Observability, Run
 from tools import Tool, ToolError, truncate
 
 
@@ -48,7 +48,7 @@ def run_agent(
     API can stream it; the loop itself does no I/O. `obs` records generations and tool
     calls for Grafana Agent Observability; it is a pass-through when not configured.
     """
-    obs = obs or Observability()
+    run = (obs or Observability()).start_run(conversation_id=conversation_id, model=model)
     messages: list[dict[str, Any]] = [*(history or []), {"role": "user", "content": task}]
     tool_defs = [t.definition() for t in registry.values()]
     in_tok = out_tok = 0
@@ -61,7 +61,7 @@ def run_agent(
         request = dict(model=model, max_tokens=2048, system=system,
                        messages=list(messages), tools=tool_defs)
         try:
-            response = obs.create_message(client, request, conversation_id=conversation_id)
+            response = run.create_message(client, request, iteration)
         except anthropic.APIError as exc:
             raise AgentError(f"model API call failed: {exc}") from exc
         in_tok += response.usage.input_tokens
@@ -83,8 +83,7 @@ def run_agent(
             return RunResult(answer, True, iteration, in_tok, out_tok)
 
         # 3. Run every requested tool and send all results back in ONE user message.
-        results = [_run_tool(call, registry, on_event, obs, conversation_id, model)
-                   for call in tool_calls]
+        results = [_run_tool(call, registry, on_event, run) for call in tool_calls]
         messages.append({"role": "user", "content": results})
 
     # Safety net: never loop forever (and never spend unbounded money).
@@ -95,13 +94,13 @@ def run_agent(
 
 
 def _run_tool(call: Any, registry: dict[str, Tool], on_event: Callable[[dict[str, Any]], None],
-              obs: Observability, conversation_id: str, model: str) -> dict[str, Any]:
+              run: Run) -> dict[str, Any]:
     """Execute one tool call. Errors become results the model can read, not crashes."""
     on_event({"type": "tool_call", "name": call.name, "input": call.input})
 
     is_error = False
     tool = registry.get(call.name)
-    with obs.tool_execution(call.name, call.id, conversation_id=conversation_id, model=model) as rec:
+    with run.tool_execution(call.name, call.id) as rec:
         try:
             if tool is None:
                 raise ToolError(f"unknown tool {call.name!r}; available: {', '.join(registry)}")

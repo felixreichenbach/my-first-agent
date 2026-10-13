@@ -43,10 +43,10 @@ The loop repeats until the model replies without asking for a tool. The user can
 
 ## Quick start
 
-Requires Docker with Compose v2 and an [Anthropic API key](https://console.anthropic.com/).
+Requires Docker with Compose v2 and an API key for your model provider (default: an [Anthropic API key](https://console.anthropic.com/)).
 
 ```bash
-cp .env.example .env     # set ANTHROPIC_API_KEY
+cp .env.example .env     # set ANTHROPIC_API_KEY (or the key of the provider you use)
 ```
 
 **CLI** (trace on stderr, answer on stdout):
@@ -125,11 +125,13 @@ Set in `.env` (see [.env.example](.env.example)):
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `ANTHROPIC_API_KEY` | Required | |
-| `MODEL` | Model ID | `claude-haiku-4-5-20251001` |
+| `ANTHROPIC_API_KEY` | Key for the default (Anthropic) model. Use your provider's key variable for another provider | |
+| `MODEL` | Model name, or `<provider>:<model>` for another provider | `claude-haiku-4-5-20251001` |
 | `MAX_ITERATIONS` | Loop cap | `10` |
 | `UI_PORT` | Host port for the UI | `8080` |
 | `AGENTO11Y_*`, `OTEL_EXPORTER_OTLP_*` | Grafana connection values. Only used once you instrument the app (see [Observability](#observability)); the shipped app ignores them | unset |
+
+**Switching the model provider.** The loop contains no provider code: `get_model()` in [agent/main.py](agent/main.py) calls LangChain's `init_chat_model(MODEL)`. To try another provider, add its package to `agent/requirements.txt` (for example `langchain-openai`), set `MODEL=openai:<model>` and that provider's key in `.env`, then rebuild. Only Anthropic has been tested here.
 
 ## Observability
 
@@ -149,7 +151,7 @@ This variant runs on LangGraph, so the Agent Observability LangGraph adapter (`a
 | Tool errors | returned to the model as a result | by default a tool exception **halts the run**; `ToolErrorMiddleware` is needed to return it to the model |
 | Several tool calls in one turn | run one after another | run **concurrently** (a write and a read of the same note in one turn can race) |
 | Tool definitions | `Tool(...)` with a hand-written JSON schema | a function with type hints and a docstring |
-| Model client | `anthropic` SDK | `ChatAnthropic` (`langchain-anthropic`) |
+| Model client | `anthropic` SDK, Anthropic only | `init_chat_model(MODEL)`: provider-agnostic, no provider code in the loop |
 | Events for the UI | emitted inside the loop | derived from `agent.stream(..., stream_mode="updates")`; tool calls and their results arrive in a slightly different order |
 | Dependencies | `anthropic`, `httpx`, FastAPI | adds `langchain`, `langchain-anthropic`, `langchain-core`, `langgraph` |
 
@@ -168,7 +170,8 @@ Uses a scripted fake chat model: no API key, free, deterministic.
 | Symptom | Fix |
 |---------|-----|
 | `Cannot connect to the Docker daemon` | Start Docker. |
-| `ANTHROPIC_API_KEY is not set` | Create `.env` from `.env.example`. |
+| `agent run failed: ... no API key` | Create `.env` from `.env.example` and set your provider's key. |
+| `could not create the model` | Unknown `MODEL`, or the provider's LangChain package isn't installed: add it to `agent/requirements.txt` and rebuild. |
 | Authentication error | Check the key and that the account has credit. |
 | `port is already allocated` | Set another `UI_PORT`. |
 

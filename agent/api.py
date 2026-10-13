@@ -45,8 +45,6 @@ def _sse(event: dict[str, Any]) -> str:
 
 @app.post("/chat")
 def chat(req: ChatRequest):
-    if not os.getenv("ANTHROPIC_API_KEY"):
-        return JSONResponse(status_code=500, content={"error": "ANTHROPIC_API_KEY is not set on the server"})
     if req.messages[-1].role != "user":
         return JSONResponse(status_code=400, content={"error": "last message must be from the user"})
 

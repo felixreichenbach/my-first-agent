@@ -1,6 +1,4 @@
 """Loop tests use a scripted fake chat model: no network, no API key."""
-import anthropic
-import httpx
 import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage
@@ -120,10 +118,24 @@ def test_iteration_cap():
     assert len(model.script) == 2  # stopped asking the model
 
 
-def test_api_failure_raises_agent_error():
-    err = anthropic.APIConnectionError(request=httpx.Request("POST", "http://x"))
-    with pytest.raises(AgentError):
-        run(make_model([err]))
+class ProviderError(Exception):
+    """Stands in for any provider's own error type: the loop must not depend on one provider."""
+
+
+@pytest.mark.parametrize("error", [ProviderError("rate limited"), ConnectionError("network down"),
+                                   TypeError("no API key or authorization credentials were provided")])
+def test_any_model_failure_raises_agent_error(error):
+    with pytest.raises(AgentError) as info:
+        run(make_model([error]))
+    assert str(error) in str(info.value)
+
+
+def test_provider_neutral_out_of_tokens_warning():
+    from langchain_core.messages import AIMessage
+    cut_off = [AIMessage(content="partial", usage_metadata=USAGE, response_metadata={"stop_reason": "max_tokens"}),
+               AIMessage(content="partial", usage_metadata=USAGE, response_metadata={"finish_reason": "length"})]
+    for message in cut_off:  # Anthropic-style and OpenAI-style signals
+        assert "cut off by the token limit" in run(make_model([message])).answer
 
 
 def test_history_is_prepended_and_events_emitted():

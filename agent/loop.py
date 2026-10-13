@@ -12,7 +12,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
-import anthropic
 from langchain.agents import create_agent
 from langchain.agents.middleware import ModelCallLimitMiddleware, ToolErrorMiddleware
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
@@ -90,7 +89,8 @@ def run_agent(
                             on_event({"type": "tool_call", "name": call["name"], "input": call["args"]})
                         if not msg.tool_calls:
                             answer = msg.text
-                            if msg.response_metadata.get("stop_reason") == "max_tokens":
+                            meta = msg.response_metadata  # provider-specific key for "ran out of tokens"
+                            if meta.get("stop_reason") == "max_tokens" or meta.get("finish_reason") == "length":
                                 answer += "\n[warning: answer was cut off by the token limit]"
                     elif node == "tools" and isinstance(msg, ToolMessage):
                         on_event({"type": "tool_result", "name": msg.name, "output": str(msg.content),
@@ -99,7 +99,9 @@ def run_agent(
         # Safety net: never loop forever (and never spend unbounded money).
         return RunResult(f"Stopped after {max_iterations} iterations without a final answer.",
                          False, iterations, in_tok, out_tok)
-    except anthropic.APIError as exc:
-        raise AgentError(f"model API call failed: {exc}") from exc
+    except Exception as exc:
+        # Provider-agnostic on purpose: every provider raises its own error types (a bad key, a rate
+        # limit, a network error). Tool failures never get here: ToolErrorMiddleware handles them.
+        raise AgentError(f"agent run failed: {exc}") from exc
 
     return RunResult(answer, True, iterations, in_tok, out_tok)

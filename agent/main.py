@@ -4,7 +4,8 @@ from __future__ import annotations
 import os
 import sys
 
-from langchain_anthropic import ChatAnthropic
+from langchain.chat_models import init_chat_model
+from langchain_core.language_models.chat_models import BaseChatModel
 
 from loop import AgentError, run_agent
 from tools import build_tools
@@ -16,9 +17,18 @@ SYSTEM_PROMPT = (
 )
 
 
-def get_model() -> ChatAnthropic:
-    return ChatAnthropic(model=os.getenv("MODEL", "claude-haiku-4-5-20251001"),
-                         max_tokens=2048, max_retries=3)  # bounded retries with backoff
+def get_model() -> BaseChatModel:
+    """Build the chat model from MODEL, for any provider LangChain supports.
+
+    "claude-haiku-4-5-20251001" and "anthropic:claude-haiku-4-5-20251001" both work. For another
+    provider install its package (e.g. langchain-openai), set MODEL=openai:<model> and that
+    provider's API key.
+    """
+    name = os.getenv("MODEL", "claude-haiku-4-5-20251001")
+    try:
+        return init_chat_model(name, max_tokens=2048, max_retries=3)  # bounded retries with backoff
+    except Exception as exc:
+        raise AgentError(f"could not create the model {name!r}: {exc}") from exc
 
 
 def print_event(event: dict) -> None:
@@ -36,10 +46,6 @@ def print_event(event: dict) -> None:
 
 
 def main() -> int:
-    if not os.getenv("ANTHROPIC_API_KEY"):
-        print("error: ANTHROPIC_API_KEY is not set (copy .env.example to .env)", file=sys.stderr)
-        return 1
-
     task = " ".join(sys.argv[1:]).strip()
     if not task:
         if not sys.stdin.isatty():

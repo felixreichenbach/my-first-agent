@@ -17,7 +17,6 @@ def parse_sse(body: str):
 
 @pytest.fixture
 def client(monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
     return TestClient(api.app)
 
 
@@ -45,9 +44,7 @@ def test_history_is_passed_to_the_model(client, monkeypatch):
 
 
 def test_model_failure_becomes_error_event(client, monkeypatch):
-    import anthropic, httpx
-    err = anthropic.APIConnectionError(request=httpx.Request("POST", "http://x"))
-    monkeypatch.setattr(api, "get_model", lambda: make_model([err]))
+    monkeypatch.setattr(api, "get_model", lambda: make_model([ConnectionError("network down")]))
     events = parse_sse(chat(client, [{"role": "user", "content": "hi"}]).text)
     assert events[-1]["type"] == "error"
 
@@ -65,6 +62,10 @@ def test_last_message_must_be_from_user(client):
     assert r.status_code == 400
 
 
-def test_missing_api_key(monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    assert chat(TestClient(api.app), [{"role": "user", "content": "a"}]).status_code == 500
+def test_model_creation_failure_becomes_error_event(client, monkeypatch):
+    def broken():
+        raise api.AgentError("could not create the model 'x': missing provider package")
+
+    monkeypatch.setattr(api, "get_model", broken)
+    events = parse_sse(chat(client, [{"role": "user", "content": "a"}]).text)
+    assert events[-1]["type"] == "error" and "could not create the model" in events[-1]["message"]

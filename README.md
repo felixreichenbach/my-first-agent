@@ -1,4 +1,4 @@
-# my-first-agent (Langchain)
+# my-first-agent (LangChain)
 
 A hands-on tutorial for building an agentic application: an LLM that calls tools in a loop until a task is done. The loop is run by LangChain's `create_agent` (see the note below), the app runs in containers, and it can be watched in a terminal or a web chat UI.
 

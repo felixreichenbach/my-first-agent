@@ -1,4 +1,4 @@
-# my-first-agent
+# my-first-agent (Langchain)
 
 A hands-on tutorial for building an agentic application: an LLM that calls tools in a loop until a task is done. The loop is hand-written against the Anthropic SDK (no framework), runs in containers, and can be watched in a terminal or a web chat UI.
 

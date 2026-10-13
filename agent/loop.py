@@ -1,9 +1,11 @@
-"""The agent loop. This file is the point of the whole project.
+"""The agent loop, LangChain edition.
 
-    while not done:
-        response = model(messages, tools)
-        if the model asked for tools: run them, append the results, continue
-        else: the model is finished -- return its answer
+`create_agent` builds the loop for us (it is a LangGraph graph under the hood):
+
+    model node -> (did the model ask for tools?) -> tools node -> model node -> ... -> done
+
+What we add on top: an iteration cap, tool errors returned to the model, and a stream of events
+for the CLI and the web UI. Compare with the hand-written loop on the `main` branch.
 """
 from __future__ import annotations
 
@@ -11,8 +13,14 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 import anthropic
+from langchain.agents import create_agent
+from langchain.agents.middleware import ModelCallLimitMiddleware, ToolErrorMiddleware
+from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.tools import BaseTool
 
-from tools import Tool, ToolError, truncate
+from tools import ToolError
 
 
 class AgentError(Exception):
@@ -28,83 +36,70 @@ class RunResult:
     output_tokens: int
 
 
+def _tool_error(exc: Exception, request: Any) -> str:
+    """Return a tool failure to the model as text, so it can recover instead of crashing the run."""
+    if isinstance(exc, ToolError):
+        return f"Error: {exc}"
+    return f"Error: tool {request.tool_call['name']} failed: {exc}"
+
+
 def run_agent(
-    client: anthropic.Anthropic,
+    model: BaseChatModel,
     task: str,
-    registry: dict[str, Tool],
+    tools: list[BaseTool],
     *,
-    model: str,
     system: str,
     max_iterations: int = 10,
     history: list[dict[str, Any]] | None = None,
     on_event: Callable[[dict[str, Any]], None] = lambda event: None,
 ) -> RunResult:
-    """Run the loop. `history` is earlier chat turns (plain user/assistant text), if any.
+    """Run the agent. `history` is earlier chat turns (plain user/assistant text), if any.
 
-    Progress is reported through `on_event` so the CLI can print it and the web
-    API can stream it; the loop itself does no I/O.
+    Progress is reported through `on_event` so the CLI can print it and the web API can stream it.
     """
-    messages: list[dict[str, Any]] = [*(history or []), {"role": "user", "content": task}]
-    tool_defs = [t.definition() for t in registry.values()]
-    in_tok = out_tok = 0
-
-    for iteration in range(1, max_iterations + 1):
-        on_event({"type": "iteration", "n": iteration})
-
-        # 1. Ask the model what to do next. The SDK retries transient
-        #    errors (429/5xx/network) with backoff; we only see the final failure.
-        try:
-            response = client.messages.create(
-                model=model, max_tokens=2048, system=system,
-                messages=messages, tools=tool_defs,
-            )
-        except anthropic.APIError as exc:
-            raise AgentError(f"model API call failed: {exc}") from exc
-        in_tok += response.usage.input_tokens
-        out_tok += response.usage.output_tokens
-
-        # Remember what the model said: the API is stateless, so we resend the whole history.
-        messages.append({"role": "assistant", "content": response.content})
-
-        for block in response.content:
-            if block.type == "text" and block.text.strip():
-                on_event({"type": "model_text", "text": block.text.strip()})
-
-        # 2. No tool requests -> the model is done.
-        tool_calls = [b for b in response.content if b.type == "tool_use"]
-        if not tool_calls:
-            answer = "".join(b.text for b in response.content if b.type == "text")
-            if response.stop_reason == "max_tokens":
-                answer += "\n[warning: answer was cut off by the token limit]"
-            return RunResult(answer, True, iteration, in_tok, out_tok)
-
-        # 3. Run every requested tool and send all results back in ONE user message.
-        results = [_run_tool(call, registry, on_event) for call in tool_calls]
-        messages.append({"role": "user", "content": results})
-
-    # Safety net: never loop forever (and never spend unbounded money).
-    return RunResult(
-        f"Stopped after {max_iterations} iterations without a final answer.",
-        False, max_iterations, in_tok, out_tok,
+    agent = create_agent(
+        model, tools, system_prompt=system,
+        middleware=[
+            # One model call per iteration: this is our iteration cap.
+            ModelCallLimitMiddleware(run_limit=max_iterations, exit_behavior="error"),
+            ToolErrorMiddleware(on_error=_tool_error),
+        ],
     )
+    messages = [
+        *(AIMessage(m["content"]) if m["role"] == "assistant" else HumanMessage(m["content"])
+          for m in (history or [])),
+        HumanMessage(task),
+    ]
 
-
-def _run_tool(call: Any, registry: dict[str, Tool], on_event: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
-    """Execute one tool call. Errors become results the model can read, not crashes."""
-    on_event({"type": "tool_call", "name": call.name, "input": call.input})
-
-    is_error = False
-    tool = registry.get(call.name)
+    iterations = in_tok = out_tok = 0
+    answer = ""
     try:
-        if tool is None:
-            raise ToolError(f"unknown tool {call.name!r}; available: {', '.join(registry)}")
-        output = truncate(str(tool.func(**call.input)))
-    except ToolError as exc:
-        is_error, output = True, f"Error: {exc}"
-    except TypeError as exc:  # model sent arguments that don't match the schema
-        is_error, output = True, f"Error: bad arguments for {call.name}: {exc}"
-    except Exception as exc:  # a bug in a tool must not kill the run
-        is_error, output = True, f"Error: tool {call.name} failed: {exc}"
+        # stream_mode="updates" yields one chunk per graph node as it finishes.
+        for chunk in agent.stream({"messages": messages}, stream_mode="updates"):
+            for node, update in chunk.items():
+                for msg in (update or {}).get("messages", []):
+                    if node == "model" and isinstance(msg, AIMessage):
+                        iterations += 1
+                        on_event({"type": "iteration", "n": iterations})
+                        usage = msg.usage_metadata or {}
+                        in_tok += usage.get("input_tokens", 0)
+                        out_tok += usage.get("output_tokens", 0)
+                        if msg.text.strip():
+                            on_event({"type": "model_text", "text": msg.text.strip()})
+                        for call in msg.tool_calls:
+                            on_event({"type": "tool_call", "name": call["name"], "input": call["args"]})
+                        if not msg.tool_calls:
+                            answer = msg.text
+                            if msg.response_metadata.get("stop_reason") == "max_tokens":
+                                answer += "\n[warning: answer was cut off by the token limit]"
+                    elif node == "tools" and isinstance(msg, ToolMessage):
+                        on_event({"type": "tool_result", "name": msg.name, "output": str(msg.content),
+                                  "is_error": msg.status == "error"})
+    except ModelCallLimitExceededError:
+        # Safety net: never loop forever (and never spend unbounded money).
+        return RunResult(f"Stopped after {max_iterations} iterations without a final answer.",
+                         False, iterations, in_tok, out_tok)
+    except anthropic.APIError as exc:
+        raise AgentError(f"model API call failed: {exc}") from exc
 
-    on_event({"type": "tool_result", "name": call.name, "output": output, "is_error": is_error})
-    return {"type": "tool_result", "tool_use_id": call.id, "content": output, "is_error": is_error}
+    return RunResult(answer, True, iterations, in_tok, out_tok)

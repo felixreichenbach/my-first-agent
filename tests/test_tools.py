@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app as tools_app
-from tools import ToolError, calculator, truncate
+from tools import ToolError, build_tools, calculator, truncate
 
 
 @pytest.mark.parametrize("expr,expected", [("17 * 23", "391"), ("(2 + 3) ** 2", "25"), ("-4 + 10 / 4", "-1.5")])
@@ -46,3 +46,11 @@ def test_missing_note(client):
 def test_fetch_url_blocks_unsafe_targets(client, url):
     r = client.post("/fetch_url", json={"url": url})
     assert r.status_code == 400
+
+
+def test_build_tools_exposes_the_four_tools_with_schemas():
+    tools = {t.name: t for t in build_tools("http://tools:8000")}
+    assert set(tools) == {"calculator", "fetch_url", "write_note", "read_note"}
+    assert tools["calculator"].invoke({"expression": "17 * 23"}) == "391"
+    assert "expression" in tools["calculator"].args and "arithmetic" in tools["calculator"].description.lower()
+    assert set(tools["write_note"].args) == {"name", "content"}

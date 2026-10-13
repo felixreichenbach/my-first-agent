@@ -1,111 +1,135 @@
-"""Loop tests use a fake model client that replays scripted responses."""
+"""Loop tests use a scripted fake chat model: no network, no API key."""
 import anthropic
 import httpx
 import pytest
-from anthropic.types import Message, TextBlock, ToolUseBlock, Usage
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.tools import StructuredTool
 
 from loop import AgentError, run_agent
-from tools import Tool, ToolError
+from tools import ToolError
 
 
-def msg(content, stop_reason):
-    return Message(id="m", type="message", role="assistant", model="fake",
-                   content=content, stop_reason=stop_reason,
-                   usage=Usage(input_tokens=10, output_tokens=5))
+class FakeChatModel(BaseChatModel):
+    """Replays scripted AIMessages (or raises scripted exceptions) and records what it was sent."""
+
+    script: list
+    requests: list = []
+
+    @property
+    def _llm_type(self) -> str:
+        return "fake"
+
+    def bind_tools(self, tools, **kwargs):  # create_agent binds the tools; the fake ignores them
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.requests.append(list(messages))
+        item = self.script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return ChatResult(generations=[ChatGeneration(message=item)])
+
+
+USAGE = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
 
 
 def text(t):
-    return msg([TextBlock(type="text", text=t)], "end_turn")
+    return AIMessage(content=t, usage_metadata=USAGE)
 
 
 def tool_use(name, input, id="tu_1"):
-    return msg([ToolUseBlock(type="tool_use", id=id, name=name, input=input)], "tool_use")
+    return AIMessage(content="", tool_calls=[{"name": name, "args": input, "id": id}], usage_metadata=USAGE)
 
 
-class FakeClient:
-    """Stands in for anthropic.Anthropic: returns scripted responses, records requests."""
-
-    def __init__(self, responses):
-        self.responses = list(responses)
-        self.requests = []
-        self.messages = self
-
-    def create(self, **kwargs):
-        self.requests.append(kwargs["messages"][:])
-        item = self.responses.pop(0)
-        if isinstance(item, Exception):
-            raise item
-        return item
+def make_model(script):
+    return FakeChatModel(script=list(script), requests=[])
 
 
-def echo_registry(func=lambda text: text.upper()):
-    tool = Tool("echo", "echo", {"type": "object", "properties": {"text": {"type": "string"}}}, func)
-    return {"echo": tool}
+def echo_tools(func=lambda text: text.upper()):
+    def echo(text: str) -> str:
+        """Echo text."""
+        return func(text)
+
+    return [StructuredTool.from_function(echo)]
 
 
-def run(client, registry=None, **kw):
-    return run_agent(client, "task", registry or echo_registry(), model="fake", system="s", **kw)
+def run(model, tools=None, **kw):
+    events = kw.pop("events", None)
+    return run_agent(model, "task", tools or echo_tools(), system="s",
+                     on_event=(events.append if events is not None else (lambda e: None)), **kw)
 
 
 def test_answer_without_tools():
-    result = run(FakeClient([text("hello")]))
+    result = run(make_model([text("hello")]))
     assert result.answer == "hello" and result.finished and result.iterations == 1
     assert (result.input_tokens, result.output_tokens) == (10, 5)
 
 
 def test_single_tool_call_feeds_result_back():
-    client = FakeClient([tool_use("echo", {"text": "hi"}), text("done: HI")])
-    result = run(client)
+    model = make_model([tool_use("echo", {"text": "hi"}), text("done: HI")])
+    events = []
+    result = run(model, events=events)
     assert result.answer == "done: HI" and result.iterations == 2
-    last_user = client.requests[1][-1]
-    assert last_user["role"] == "user"
-    assert last_user["content"][0]["tool_use_id"] == "tu_1"
-    assert last_user["content"][0]["content"] == "HI"
-    assert last_user["content"][0]["is_error"] is False
+    sent_second = model.requests[1]
+    assert sent_second[-1].content == "HI" and sent_second[-1].tool_call_id == "tu_1"
+    assert [e["type"] for e in events] == ["iteration", "tool_call", "tool_result", "iteration", "model_text"]
+    assert events[2] == {"type": "tool_result", "name": "echo", "output": "HI", "is_error": False}
 
 
 def test_multi_step_tool_calls():
-    client = FakeClient([tool_use("echo", {"text": "a"}, "1"), tool_use("echo", {"text": "b"}, "2"), text("ok")])
-    assert run(client).iterations == 3
+    model = make_model([tool_use("echo", {"text": "a"}, "1"), tool_use("echo", {"text": "b"}, "2"), text("ok")])
+    assert run(model).iterations == 3
 
 
 def test_tool_error_is_returned_to_model():
     def boom(text):
         raise ToolError("nope")
 
-    client = FakeClient([tool_use("echo", {"text": "x"}), text("recovered")])
-    result = run(client, echo_registry(boom))
+    events = []
+    model = make_model([tool_use("echo", {"text": "x"}), text("recovered")])
+    result = run(model, echo_tools(boom), events=events)
     assert result.answer == "recovered"
-    tool_result = client.requests[1][-1]["content"][0]
-    assert tool_result["is_error"] is True and "nope" in tool_result["content"]
+    assert {"type": "tool_result", "name": "echo", "output": "Error: nope", "is_error": True} in events
+
+
+def test_unexpected_tool_exception_does_not_crash():
+    def boom(text):
+        raise RuntimeError("bug")
+
+    events = []
+    result = run(make_model([tool_use("echo", {"text": "x"}), text("ok")]), echo_tools(boom), events=events)
+    assert result.finished
+    assert any(e["type"] == "tool_result" and e["is_error"] and "bug" in e["output"] for e in events)
 
 
 def test_unknown_tool_and_bad_arguments_do_not_crash():
-    client = FakeClient([tool_use("missing", {}, "1"), tool_use("echo", {"wrong": 1}, "2"), text("ok")])
-    result = run(client)
+    events = []
+    model = make_model([tool_use("missing", {}, "1"), tool_use("echo", {"wrong": 1}, "2"), text("ok")])
+    result = run(model, events=events)
     assert result.finished
-    assert client.requests[1][-1]["content"][0]["is_error"] is True
-    assert client.requests[2][-1]["content"][0]["is_error"] is True
+    results = [e for e in events if e["type"] == "tool_result"]
+    assert len(results) == 2 and all(e["is_error"] for e in results)
 
 
 def test_iteration_cap():
-    client = FakeClient([tool_use("echo", {"text": "x"}, str(i)) for i in range(5)])
-    result = run(client, max_iterations=3)
+    model = make_model([tool_use("echo", {"text": "x"}, str(i)) for i in range(5)])
+    result = run(model, max_iterations=3)
     assert not result.finished and result.iterations == 3
-    assert len(client.responses) == 2  # stopped asking the model
+    assert len(model.script) == 2  # stopped asking the model
 
 
 def test_api_failure_raises_agent_error():
     err = anthropic.APIConnectionError(request=httpx.Request("POST", "http://x"))
     with pytest.raises(AgentError):
-        run(FakeClient([err]))
+        run(make_model([err]))
 
 
 def test_history_is_prepended_and_events_emitted():
-    client = FakeClient([tool_use("echo", {"text": "x"}), text("fin")])
+    model = make_model([tool_use("echo", {"text": "x"}), text("fin")])
     events = []
     history = [{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "reply"}]
-    run(client, history=history, on_event=events.append)
-    assert [m["content"] for m in client.requests[0]] == ["earlier", "reply", "task"]
+    run(model, history=history, events=events)
+    assert [m.content for m in model.requests[0]][-3:] == ["earlier", "reply", "task"]
     assert [e["type"] for e in events] == ["iteration", "tool_call", "tool_result", "iteration", "model_text"]
-    assert events[2] == {"type": "tool_result", "name": "echo", "output": "X", "is_error": False}

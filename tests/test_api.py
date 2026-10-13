@@ -4,7 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import api
-from test_loop import FakeClient, text, tool_use
+from test_loop import make_model, text, tool_use
 
 
 def parse_sse(body: str):
@@ -26,8 +26,8 @@ def chat(client, messages):
 
 
 def test_streams_loop_events_then_answer(client, monkeypatch):
-    fake = FakeClient([tool_use("calculator", {"expression": "2+2"}), text("it is 4")])
-    monkeypatch.setattr(api, "get_client", lambda: fake)
+    fake = make_model([tool_use("calculator", {"expression": "2+2"}), text("it is 4")])
+    monkeypatch.setattr(api, "get_model", lambda: fake)
     r = chat(client, [{"role": "user", "content": "2+2?"}])
     assert r.headers["content-type"].startswith("text/event-stream")
     events = parse_sse(r.text)
@@ -37,17 +37,17 @@ def test_streams_loop_events_then_answer(client, monkeypatch):
 
 
 def test_history_is_passed_to_the_model(client, monkeypatch):
-    fake = FakeClient([text("ok")])
-    monkeypatch.setattr(api, "get_client", lambda: fake)
+    fake = make_model([text("ok")])
+    monkeypatch.setattr(api, "get_model", lambda: fake)
     chat(client, [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"},
                   {"role": "user", "content": "c"}])
-    assert [m["content"] for m in fake.requests[0]] == ["a", "b", "c"]
+    assert [m.content for m in fake.requests[0]][-3:] == ["a", "b", "c"]
 
 
 def test_model_failure_becomes_error_event(client, monkeypatch):
     import anthropic, httpx
     err = anthropic.APIConnectionError(request=httpx.Request("POST", "http://x"))
-    monkeypatch.setattr(api, "get_client", lambda: FakeClient([err]))
+    monkeypatch.setattr(api, "get_model", lambda: make_model([err]))
     events = parse_sse(chat(client, [{"role": "user", "content": "hi"}]).text)
     assert events[-1]["type"] == "error"
 

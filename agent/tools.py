@@ -1,39 +1,23 @@
-"""Tool definitions and the registry the loop uses.
+"""Tools the agent can call.
 
-A tool is: a name, a description the model reads, a JSON-schema for its input,
-and a Python function that does the work. To add a tool, write one function and
-add one entry to `build_registry` -- the loop does not change.
+A tool is a plain Python function with type hints and a docstring: LangChain turns the docstring
+into the description the model reads and the type hints into its input schema. To add a tool,
+write one function and add one `StructuredTool.from_function(...)` entry to `build_tools`.
 """
 from __future__ import annotations
 
 import ast
 import operator
-from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 import httpx
+from langchain_core.tools import BaseTool, StructuredTool
 
-MAX_TOOL_OUTPUT = 10_000  # bytes/characters returned to the model per tool call
+MAX_TOOL_OUTPUT = 10_000  # characters returned to the model per tool call
 
 
 class ToolError(Exception):
     """Raised by a tool; the message is shown to the model so it can recover."""
-
-
-@dataclass
-class Tool:
-    name: str
-    description: str
-    input_schema: dict[str, Any]
-    func: Callable[..., str]
-
-    def definition(self) -> dict[str, Any]:
-        """The shape the Anthropic API expects in the `tools` parameter."""
-        return {
-            "name": self.name,
-            "description": self.description,
-            "input_schema": self.input_schema,
-        }
 
 
 def truncate(text: str, limit: int = MAX_TOOL_OUTPUT) -> str:
@@ -92,41 +76,46 @@ def _remote(tools_url: str, endpoint: str, payload: dict[str, Any]) -> str:
     return str(data.get("result", ""))
 
 
-def build_registry(tools_url: str) -> dict[str, Tool]:
-    tools = [
-        Tool(
-            "calculator",
-            "Evaluate an arithmetic expression, e.g. '17 * 23' or '(2 + 3) ** 2'. "
-            "Use this instead of doing maths yourself.",
-            {"type": "object",
-             "properties": {"expression": {"type": "string"}},
-             "required": ["expression"]},
-            calculator,
-        ),
-        Tool(
-            "fetch_url",
-            "Fetch a public web page over http(s) and return its text content.",
-            {"type": "object",
-             "properties": {"url": {"type": "string", "description": "Full http(s) URL"}},
-             "required": ["url"]},
-            lambda url: _remote(tools_url, "fetch_url", {"url": url}),
-        ),
-        Tool(
-            "write_note",
-            "Save text to a named note that persists between runs. Overwrites an existing note.",
-            {"type": "object",
-             "properties": {"name": {"type": "string", "description": "letters, digits, - and _ only"},
-                            "content": {"type": "string"}},
-             "required": ["name", "content"]},
-            lambda name, content: _remote(tools_url, "write_note", {"name": name, "content": content}),
-        ),
-        Tool(
-            "read_note",
-            "Read a previously saved note by name.",
-            {"type": "object",
-             "properties": {"name": {"type": "string"}},
-             "required": ["name"]},
-            lambda name: _remote(tools_url, "read_note", {"name": name}),
-        ),
+def build_tools(tools_url: str) -> list[BaseTool]:
+    """The tools the agent may call. The calculator runs in-process; the rest call the tools service."""
+
+    def calc(expression: str) -> str:
+        """Evaluate an arithmetic expression, e.g. '17 * 23' or '(2 + 3) ** 2'. Use this instead of doing maths yourself.
+
+        Args:
+            expression: The arithmetic expression to evaluate.
+        """
+        return calculator(expression)
+
+    def fetch_url(url: str) -> str:
+        """Fetch a public web page over http(s) and return its text content.
+
+        Args:
+            url: Full http(s) URL.
+        """
+        return truncate(_remote(tools_url, "fetch_url", {"url": url}))
+
+    def write_note(name: str, content: str) -> str:
+        """Save text to a named note that persists between runs. Overwrites an existing note.
+
+        Args:
+            name: Note name: letters, digits, - and _ only.
+            content: The text to save.
+        """
+        return _remote(tools_url, "write_note", {"name": name, "content": content})
+
+    def read_note(name: str) -> str:
+        """Read a previously saved note by name.
+
+        Args:
+            name: The note name.
+        """
+        return truncate(_remote(tools_url, "read_note", {"name": name}))
+
+    return [
+        StructuredTool.from_function(func, name=name, parse_docstring=True)
+        for name, func in (
+            ("calculator", calc), ("fetch_url", fetch_url),
+            ("write_note", write_note), ("read_note", read_note),
+        )
     ]
-    return {t.name: t for t in tools}

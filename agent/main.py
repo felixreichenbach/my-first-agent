@@ -4,16 +4,21 @@ from __future__ import annotations
 import os
 import sys
 
-import anthropic
+from langchain_anthropic import ChatAnthropic
 
 from loop import AgentError, run_agent
-from tools import build_registry
+from tools import build_tools
 
 SYSTEM_PROMPT = (
     "You are a concise assistant with tools. Use a tool whenever it gives a more "
     "reliable answer than guessing (arithmetic, web pages, saved notes). "
     "When you have what you need, reply with the final answer and no further tool calls."
 )
+
+
+def get_model() -> ChatAnthropic:
+    return ChatAnthropic(model=os.getenv("MODEL", "claude-haiku-4-5-20251001"),
+                         max_tokens=2048, max_retries=3)  # bounded retries with backoff
 
 
 def print_event(event: dict) -> None:
@@ -52,10 +57,9 @@ def main() -> int:
 
     try:
         result = run_agent(
-            anthropic.Anthropic(max_retries=3),  # bounded retries with backoff
+            get_model(),
             task,
-            build_registry(os.getenv("TOOLS_URL", "http://tools:8000")),
-            model=os.getenv("MODEL", "claude-haiku-4-5-20251001"),
+            build_tools(os.getenv("TOOLS_URL", "http://tools:8000")),
             system=SYSTEM_PROMPT,
             max_iterations=max_iterations,
             on_event=print_event,

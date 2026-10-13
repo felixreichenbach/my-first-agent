@@ -11,14 +11,13 @@ import queue
 import threading
 from typing import Any, Iterator, Literal
 
-import anthropic
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from loop import AgentError, run_agent
-from main import SYSTEM_PROMPT
-from tools import build_registry
+from main import SYSTEM_PROMPT, get_model
+from tools import build_tools
 
 
 app = FastAPI()
@@ -33,10 +32,6 @@ class ChatRequest(BaseModel):
     # The browser keeps the conversation and sends it with every request.
     # Only plain text is carried between turns; tool calls from earlier turns are not replayed.
     messages: list[Turn] = Field(min_length=1, max_length=50)
-
-
-def get_client() -> anthropic.Anthropic:
-    return anthropic.Anthropic(max_retries=3)
 
 
 @app.get("/health")
@@ -62,8 +57,7 @@ def chat(req: ChatRequest):
         # The loop is synchronous, so it runs in a thread and pushes events to the queue.
         try:
             result = run_agent(
-                get_client(), last["content"], build_registry(os.getenv("TOOLS_URL", "http://tools:8000")),
-                model=os.getenv("MODEL", "claude-haiku-4-5-20251001"),
+                get_model(), last["content"], build_tools(os.getenv("TOOLS_URL", "http://tools:8000")),
                 system=SYSTEM_PROMPT,
                 max_iterations=int(os.getenv("MAX_ITERATIONS", "10")),
                 history=history, on_event=events.put,

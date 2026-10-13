@@ -1,6 +1,6 @@
 # my-first-agent (Langchain)
 
-A hands-on tutorial for building an agentic application: an LLM that calls tools in a loop until a task is done. The loop is hand-written against the Anthropic SDK (no framework), runs in containers, and can be watched in a terminal or a web chat UI.
+A hands-on tutorial for building an agentic application: an LLM that calls tools in a loop until a task is done. The loop is run by LangChain's `create_agent` (see the note below), the app runs in containers, and it can be watched in a terminal or a web chat UI.
 
 > **Branch `langchain-variant`.** The same application, but the agent loop is not hand-written:
 > LangChain's `create_agent` runs it. Everything else (tools service, web UI, CLI, Compose setup)
@@ -49,7 +49,7 @@ Requires Docker with Compose v2 and an API key for your model provider (default:
 cp .env.example .env     # set ANTHROPIC_API_KEY (or the key of the provider you use)
 ```
 
-**CLI** (trace on stderr, answer on stdout):
+**CLI** (trace on stderr, answer on stdout). Add `--build` after changing code: `up --build` doesn't rebuild this image.
 
 ```bash
 docker compose run --rm agent-cli "What is 17 * 23, and what is the title of https://example.com?"
@@ -80,7 +80,7 @@ docker compose down          # stop; add -v to delete saved notes
  │    ┌─────────────────────────────┐   ┌──────────────────────────────┐          │
  │    │ agent  (API mode)           │   │ agent-cli  (CLI mode)        │          │
  │    │ uvicorn :8080               │   │ profile: cli                 │          │
- │    │ ANTHROPIC_API_KEY           │   │ ANTHROPIC_API_KEY            │          │
+ │    │ provider API key            │   │ provider API key             │          │
  │    └──────────────┬──────────────┘   └──────────────┬───────────────┘          │
  │                   └────────────────┬────────────────┘                          │
  │                                    │  same agent loop in both                  │
@@ -94,8 +94,8 @@ docker compose down          # stop; add -v to delete saved notes
  │                                                                          │     │
  └────────────────────────────────────┬─────────────────────────────────────┬─────┘
                                       │  public addresses only              ▼
-                                      ▼                                Claude API
-                           public web (fetch_url)                   api.anthropic.com
+                                      ▼                                Model API
+                           public web (fetch_url)                   default: Anthropic
 ```
 
 | Service | Role | Secrets |
@@ -115,7 +115,7 @@ The web page has no login, so keep it bound to localhost: anyone who can reach i
 | `fetch_url` | `tools` service | Fetch a public web page; private addresses are blocked |
 | `write_note` / `read_note` | `tools` service | Notes persisted in a volume |
 
-Tools can live in two places: **in-process** (a plain function the loop calls) or in a **separate service** (called over HTTP). Side-effecting tools run in `tools`, which has no API key, so they stay isolated from the agent. The model sees one registry and cannot tell the difference.
+Tools can live in two places: **in-process** (a plain function the loop calls) or in a **separate service** (called over HTTP). Side-effecting tools run in `tools`, which has no API key, so they stay isolated from the agent. The model sees one list of tools and cannot tell the difference.
 
 **Add a tool**: write a function with type hints and a docstring, and add one entry to the list in `build_tools` in [agent/tools.py](agent/tools.py). LangChain builds the name, description and input schema from them. The loop does not change. Rebuild with `docker compose up --build -d` (web) or `docker compose run --rm --build agent-cli "..."` (CLI).
 
@@ -139,7 +139,7 @@ The app ships **uninstrumented**: it contains no tracing, metrics or telemetry c
 
 Follow [docs/agent-observability.md](docs/agent-observability.md). It covers the prerequisites, where to get the connection values in Grafana, and the ways to instrument the app: with a coding agent and gcx, with a coding agent without gcx, or by hand. The commented Grafana block in [.env.example](.env.example) is where those values go.
 
-This variant runs on LangGraph, so the Agent Observability LangGraph adapter (`agento11y-langgraph`, with `capture_workflow_steps=True`) can record generations, tool calls and workflow steps through a single callback on `agent.stream(..., config=...)`. That is the natural way to instrument it here; I haven't tried it. The loop also reports every step through its `on_event` callback.
+This variant runs on LangGraph, so the Agent Observability LangGraph adapter (`agento11y-langgraph`, with `capture_workflow_steps=True`) can record generations, tool calls and workflow steps through a single callback on `agent.stream(..., config=...)`. That is the natural way to instrument it here (not tried in this repo). The loop also reports every step through its `on_event` callback.
 
 ## Differences from `main`
 
